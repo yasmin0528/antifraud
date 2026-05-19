@@ -1,0 +1,13 @@
+# 参数敏感性实验：batch_size
+experiment:
+  name: "sweep_batch_size"
+  seed: 42
+
+sweep:
+  enabled: true
+  method: "grid"
+  params:
+    batch_size: [16, 32, 64, 128, 256]
+
+train:
+  epochs: 5

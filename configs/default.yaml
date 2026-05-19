@@ -1,0 +1,105 @@
+# ============================================================
+# 默认配置 —— AML 反洗钱检测
+# ============================================================
+
+# -------- 实验元信息 --------
+experiment:
+  name: "aml_baseline"
+  seed: 42
+  output_dir: "outputs"
+  device: "auto"            # "auto" | "cuda" | "cpu"
+  mode: "train"             # "train" | "test" | "infer"
+
+# -------- 数据配置 --------
+data:
+  dataset: "aml"
+  data_path: "dataset.csv"
+  preprocessed_path: "preprocessed_data.pt"
+  regenerate: false
+  val_ratio: 0.1
+  test_ratio: 0.1
+  use_smote: false
+  smote_ratio: 1.0
+  batch_size: 32
+  num_workers: 0            # Windows建议0, Linux可>0
+
+# -------- 模型配置 --------
+model:
+  name: "MPFC"              # LLM 是 mPFC 内置组件，由 ablation remove_modules 中的 wo_llm 控制开启/关闭
+  hidden_dim: 128
+  dim_type: 16
+  dropout: 0.2
+  edge_attr_dim: 2
+  task_dim: 128
+
+  # CA1
+  ca1:
+    feature_dim: 3
+    hidden_dim: 128
+
+  # CA3
+  ca3:
+    emb_dim: 128
+    memory_momentum: 0.9
+
+  # MPFC (GNN)
+  mpfc:
+    gnn_layers: 2
+    gnn_heads: 4
+
+  # LLM (mPFC 内置组件，模拟前额叶符号推理)
+  llm:
+    model_name: "meta-llama/Llama-3.2-8B-Instruct"
+    use_api: true
+    api_url: null
+    api_key: null
+    rule_update_frequency: 100
+    max_rules: 20
+
+# -------- 训练配置 --------
+train:
+  epochs: 10
+  lr: 0.001
+  weight_decay: 0.0001
+  pos_weight: 5.0
+  focal_gamma: 2.0
+  rpe_beta: 1.5
+  patience: 5
+  grad_clip: 1.0
+  log_interval: 200        # 每N个batch打印日志
+
+# -------- 消融配置 --------
+ablation:
+  enabled: false
+  remove_modules: []        # e.g. ["ca1", "ca3", "mpfc", "vta"]
+  variants: []
+
+# -------- 参数扫描配置 --------
+sweep:
+  enabled: false
+  method: "grid"            # "grid" | "random"
+  params:
+    # 每个参数是一个列表
+    batch_size: null        # e.g. [16, 32, 64]
+    lr: null                # e.g. [0.0001, 0.001, 0.01]
+    hidden_dim: null        # e.g. [64, 128, 256]
+    dropout: null
+    pos_weight: null
+    focal_gamma: null
+    gnn_layers: null
+    gnn_heads: null
+
+# -------- 多种子实验 --------
+multi_seed:
+  enabled: false
+  seeds: [42, 123, 456, 789, 1111]
+
+# -------- 可视化 --------
+visualization:
+  enabled: true
+  save_figures: true
+  plot_loss: true
+  plot_roc: true
+  plot_tsne: false          # t-SNE 计算较慢，默认关闭
+  plot_attention: false
+  plot_model_graph: false

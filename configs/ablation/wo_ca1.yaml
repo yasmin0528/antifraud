@@ -1,0 +1,9 @@
+# 消融实验：移除 CA1 模块
+experiment:
+  name: "ablation_wo_ca1"
+  seed: 42
+
+ablation:
+  enabled: true
+  remove_modules: ["ca1"]
+  variants: []

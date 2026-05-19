@@ -1,0 +1,9 @@
+# 消融实验：使用普通 BCE Loss（移除 VTA）
+experiment:
+  name: "ablation_wo_vta"
+  seed: 42
+
+ablation:
+  enabled: true
+  remove_modules: ["vta"]
+  variants: []

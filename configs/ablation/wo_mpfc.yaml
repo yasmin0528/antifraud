@@ -1,0 +1,9 @@
+# 消融实验：移除 MPFC 模块（仅保留 CA1 + CA3 + 线性分类器）
+experiment:
+  name: "ablation_wo_mpfc"
+  seed: 42
+
+ablation:
+  enabled: true
+  remove_modules: ["mpfc"]
+  variants: []

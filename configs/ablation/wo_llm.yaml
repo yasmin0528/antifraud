@@ -1,0 +1,10 @@
+# 消融实验：保留 MPFC 但去除 LLM 符号规则生成（测试 LLM 作为 mPFC 内置组件的效果）
+# LLM 是 mPFC 模块的天然组成部分，wo_llm 用于验证其贡献度
+experiment:
+  name: "ablation_wo_llm"
+  seed: 42
+
+ablation:
+  enabled: true
+  remove_modules: ["wo_llm"]
+  variants: []
