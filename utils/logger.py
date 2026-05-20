@@ -77,6 +77,10 @@ class Logger:
         """记录标量到 TensorBoard。"""
         self.tb_writer.add_scalar(tag, value, step)
 
+    def log_scalar(self, tag: str, value: float, step: int):
+        """log_scalar 别名，兼容旧接口。"""
+        self.scalar(tag, value, step)
+
     def scalars(self, tag: str, value_dict: dict, step: int):
         """记录多个标量。"""
         self.tb_writer.add_scalars(tag, value_dict, step)
@@ -84,6 +88,15 @@ class Logger:
     def figure(self, tag: str, figure, step: int):
         """记录 matplotlib 图表。"""
         self.tb_writer.add_figure(tag, figure, step)
+
+    def log_figure(self, tag: str, figure_or_path, step: int = 0):
+        """log_figure 别名，兼容旧接口。支持传入文件路径或 figure 对象。"""
+        if isinstance(figure_or_path, str):
+            import matplotlib.image as mpimg
+            fig = mpimg.imread(figure_or_path)
+            self.tb_writer.add_image(tag, fig, step, dataformats="HWC")
+        else:
+            self.figure(tag, figure_or_path, step)
 
     def histogram(self, tag: str, values, step: int):
         """记录直方图。"""

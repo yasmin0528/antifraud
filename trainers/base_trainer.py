@@ -33,7 +33,6 @@ from utils import (
     Config,
     Logger,
     MetricTracker,
-    TensorBoardLogger,
     Visualizer,
     set_seed,
 )
@@ -63,11 +62,15 @@ class BaseTrainer:
 
         # 日志
         self.logger = Logger(
-            name=cfg.experiment.name,
             log_dir=self.output_dir,
-            console_output=True,
+            name=cfg.experiment.name,
+            console=True,
         )
-        self.tb_logger = TensorBoardLogger(log_dir=self.output_dir)
+        self.tb_logger = Logger(
+            log_dir=self.output_dir,
+            name=f"{cfg.experiment.name}_tb",
+            console=False,
+        )
 
         # 可视化
         self.visualizer = Visualizer(save_dir=self.output_dir)
