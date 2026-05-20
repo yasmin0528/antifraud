@@ -37,6 +37,7 @@ from typing import Dict, Optional
 
 from experiments.runner import ExperimentRunner
 from utils import Logger, load_config, merge_config
+from utils.config import Config
 
 
 def parse_args() -> argparse.Namespace:
