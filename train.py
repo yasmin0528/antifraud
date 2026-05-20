@@ -231,6 +231,13 @@ def setup_experiment(
     output_dir = os.path.join(cfg.experiment.output_dir, cfg.experiment.name)
     os.makedirs(output_dir, exist_ok=True)
 
+    # 将数据路径转为绝对路径（相对于配置文件所在目录）
+    config_dir = os.path.dirname(os.path.abspath(config_path))
+    if not os.path.isabs(cfg.data.data_path):
+        cfg.data.data_path = os.path.join(config_dir, cfg.data.data_path)
+    if not os.path.isabs(cfg.data.preprocessed_path):
+        cfg.data.preprocessed_path = os.path.join(config_dir, cfg.data.preprocessed_path)
+
     return cfg
 
 

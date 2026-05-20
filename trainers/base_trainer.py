@@ -264,13 +264,14 @@ class BaseTrainer:
         epoch_loss = 0.0
         tracker = MetricTracker()
 
-        # 交易摘要（用于 MPFC 内置 LLM 规则生成）
-        transaction_summary = None
-        if has_mpfc:
+        # 交易摘要（用于 MPFC 内置 LLM 规则生成）—— 只在第一轮构建
+        transaction_summary = getattr(self, '_transaction_summary', None)
+        if transaction_summary is None and has_mpfc:
             try:
                 first_batch = next(iter(self.train_loader))
                 _, _, _, edge_e_first, _, label_first = first_batch
                 transaction_summary = build_transaction_summary(edge_e_first, label_first)
+                self._transaction_summary = transaction_summary
                 self.logger.info(f"Transaction summary built ({len(transaction_summary)} chars)")
             except (StopIteration, Exception) as e:
                 self.logger.warning(f"Failed to build transaction summary: {e}")
@@ -341,8 +342,8 @@ class BaseTrainer:
             epoch_loss += loss.item()
             tracker.update(pred_prob.detach().cpu(), label.cpu())
 
-            # 日志
-            if batch_idx % cfg.train.log_interval == 0 or batch_idx == len(self.train_loader):
+            # 日志（仅在每个 epoch 结束打印最终 loss）
+            if cfg.train.log_interval > 0 and batch_idx % cfg.train.log_interval == 0:
                 self.logger.info(
                     f"Epoch {self.current_epoch}/{cfg.train.epochs} "
                     f"batch {batch_idx}/{len(self.train_loader)} "
@@ -469,7 +470,7 @@ class BaseTrainer:
 
         for thr in thresholds:
             y_pred = (y_prob >= thr).astype(int)
-            metrics = ClassificationMetrics.compute_all(y_true, y_pred, y_prob)
+            metrics = ClassificationMetrics(y_true, y_prob, thr).report()
             if metrics["f1"] > best_f1:
                 best_f1 = metrics["f1"]
                 best_threshold = thr

@@ -103,6 +103,12 @@ class LLMInterface:
         if not rules:
             rules = self._fallback_rules(transaction_summary)
             self._fallback_count += 1
+            if self._fallback_count == 1:
+                print(
+                    f"[LLMInterface] LLM call failed (api_url={self.api_url}), "
+                    f"using {len(rules)} fallback rules. "
+                    f"To use LLM, provide a valid --llm_api_url."
+                )
 
         self.cache.set(transaction_summary, rules)
         return rules
