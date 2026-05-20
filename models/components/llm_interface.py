@@ -155,22 +155,23 @@ Output ONLY a valid JSON array (no extra text):
                     headers["Authorization"] = f"Bearer {self.api_key}"
 
                 if is_chat_endpoint:
+                    # vLLM 的 chat/completions 接口通常接受任意 model 值
                     payload = {
                         "model": self.model_name,
                         "messages": [{"role": "user", "content": prompt}],
-                        "max_tokens": 512, "temperature": 0.3, "top_p": 0.9,
+                        "max_tokens": 1024, "temperature": 0.3, "top_p": 0.9,
                         "stream": False,
                     }
                 elif is_ollama_native:
                     payload = {
                         "model": self.model_name,
                         "prompt": prompt, "stream": False,
-                        "options": {"temperature": 0.3, "top_p": 0.9, "num_predict": 512},
+                        "options": {"temperature": 0.3, "top_p": 0.9, "num_predict": 1024},
                     }
                 else:
                     payload = {
                         "model": self.model_name, "prompt": prompt,
-                        "max_tokens": 512, "temperature": 0.3, "top_p": 0.9,
+                        "max_tokens": 1024, "temperature": 0.3, "top_p": 0.9,
                     }
 
                 response = requests.post(
@@ -203,6 +204,10 @@ Output ONLY a valid JSON array (no extra text):
                         parsed = self._parse_rules(text)
                         if parsed:
                             return parsed
+                    else:
+                        print(f"[LLM API] Attempt {attempt + 1}: empty response, "
+                              f"status={response.status_code}, "
+                              f"body_keys={list(result.keys()) if isinstance(result, dict) else 'N/A'}")
 
             except Exception as e:
                 print(f"[LLM API] Attempt {attempt + 1} error: {e}")
