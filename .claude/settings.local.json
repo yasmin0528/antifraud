@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python:*)",
+      "Bash(python -m py_compile:*)",
+      "Bash(python -m:*)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}

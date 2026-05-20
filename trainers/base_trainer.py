@@ -25,6 +25,7 @@ from datasets.aml_dataset import (
     build_batch_graph,
     build_transaction_summary,
     get_dataloaders,
+    preprocess_data,
 )
 from models import CA1_TTPM, CA3_AGM, MPFC, vta_weighted_loss
 from utils import (
@@ -76,7 +77,10 @@ class BaseTrainer:
         self.visualizer = Visualizer(save_dir=self.output_dir)
 
         # Checkpoint
-        self.ckpt_manager = CheckpointManager(save_dir=self.output_dir)
+        self.ckpt_manager = CheckpointManager(
+            ckpt_dir=self.output_dir,
+            experiment_name=cfg.experiment.name,
+        )
 
         # 数据
         self.train_loader: Optional[torch.utils.data.DataLoader] = None
@@ -335,7 +339,7 @@ class BaseTrainer:
             self.global_step += 1
 
             epoch_loss += loss.item()
-            tracker.update(label.cpu(), pred_prob.detach().cpu())
+            tracker.update(pred_prob.detach().cpu(), label.cpu())
 
             # 日志
             if batch_idx % cfg.train.log_interval == 0 or batch_idx == len(self.train_loader):
@@ -405,7 +409,7 @@ class BaseTrainer:
         y_prob = torch.cat(all_probs).numpy()
         y_pred = (y_prob >= threshold).astype(int)
 
-        return ClassificationMetrics.compute_all(y_true, y_pred, y_prob)
+        return ClassificationMetrics(y_true, y_prob, threshold).report()
 
     @torch.no_grad()
     def _search_best_threshold(
@@ -508,7 +512,8 @@ class BaseTrainer:
                     # 保存最佳 checkpoint
                     state_dicts = {name: m.state_dict() for name, m in self.models.items()}
                     self.ckpt_manager.save_best(
-                        state_dicts, epoch, val_metrics["f1"]
+                        {"model_state_dict": state_dicts, "epoch": epoch},
+                        val_metrics["f1"],
                     )
                 else:
                     self.patience_counter += 1
@@ -518,7 +523,10 @@ class BaseTrainer:
 
             # 保存最新 checkpoint
             state_dicts = {name: m.state_dict() for name, m in self.models.items()}
-            self.ckpt_manager.save_latest(state_dicts, epoch)
+            self.ckpt_manager.save(
+                {"model_state_dict": state_dicts, "epoch": epoch},
+                epoch=epoch, step=self.global_step,
+            )
 
             epoch_time = time.time() - epoch_start
 
@@ -570,7 +578,12 @@ class BaseTrainer:
             # 加载最佳模型
             best_ckpt = self.ckpt_manager.load_best(self.device)
             if best_ckpt:
-                for name, state_dict in best_ckpt["model_state_dict"].items():
+                state_dicts = (
+                    best_ckpt["model_state_dict"]
+                    if "model_state_dict" in best_ckpt
+                    else best_ckpt
+                )
+                for name, state_dict in state_dicts.items():
                     if name in self.models:
                         self.models[name].load_state_dict(state_dict)
 
@@ -613,9 +626,15 @@ class BaseTrainer:
 
         # Loss curve
         if cfg.plot_loss:
-            self.visualizer.plot_loss_curve(
-                os.path.join(self.output_dir, "train_log.txt")
-            )
+            log_path = os.path.join(self.output_dir, f"{self.cfg.experiment.name}.log")
+            train_losses = self._extract_losses_from_log(log_path)
+            if train_losses:
+                self.visualizer.plot_loss_curve(
+                    train_losses,
+                    name="loss_curve",
+                )
+            else:
+                self.logger.warning("No loss values found for plotting.")
 
         # ROC & PR curves
         if cfg.plot_roc and self.val_loader is not None:
@@ -656,15 +675,15 @@ class BaseTrainer:
 
                 self.visualizer.plot_roc_curve(
                     y_true, y_prob,
-                    save_path=os.path.join(self.output_dir, "roc_curve.png"),
+                    name="roc_curve",
                 )
                 self.visualizer.plot_pr_curve(
                     y_true, y_prob,
-                    save_path=os.path.join(self.output_dir, "pr_curve.png"),
+                    name="pr_curve",
                 )
                 self.visualizer.plot_confusion_matrix(
                     y_true, (y_prob >= self.best_threshold).astype(int),
-                    save_path=os.path.join(self.output_dir, "confusion_matrix.png"),
+                    name="confusion_matrix",
                 )
 
                 # Log to tensorboard
@@ -687,14 +706,24 @@ class BaseTrainer:
 
         if checkpoint_path:
             ckpt = torch.load(checkpoint_path, map_location=self.device)
-            for name, state_dict in ckpt["model_state_dict"].items():
+            state_dicts = (
+                ckpt["model_state_dict"]
+                if "model_state_dict" in ckpt
+                else ckpt
+            )
+            for name, state_dict in state_dicts.items():
                 if name in self.models:
                     self.models[name].load_state_dict(state_dict)
             self.logger.info(f"Loaded checkpoint from {checkpoint_path}")
         else:
             best_ckpt = self.ckpt_manager.load_best(self.device)
             if best_ckpt:
-                for name, state_dict in best_ckpt["model_state_dict"].items():
+                state_dicts = (
+                    best_ckpt["model_state_dict"]
+                    if "model_state_dict" in best_ckpt
+                    else best_ckpt
+                )
+                for name, state_dict in state_dicts.items():
                     if name in self.models:
                         self.models[name].load_state_dict(state_dict)
                 self.logger.info("Loaded best checkpoint")
@@ -706,3 +735,22 @@ class BaseTrainer:
             f"AUC={test_metrics.get('auc', float('nan')):.4f}"
         )
         return test_metrics
+
+    @staticmethod
+    def _extract_losses_from_log(log_path: str) -> List[float]:
+        """从日志文件中提取 loss 值（仅用于可视化）。"""
+        losses = []
+        try:
+            with open(log_path, "r") as f:
+                for line in f:
+                    if "loss=" in line:
+                        parts = line.split("loss=")
+                        if len(parts) > 1:
+                            try:
+                                loss_val = float(parts[1].split()[0])
+                                losses.append(loss_val)
+                            except (ValueError, IndexError):
+                                pass
+        except (FileNotFoundError, IOError):
+            pass
+        return losses

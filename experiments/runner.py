@@ -40,7 +40,7 @@ class ExperimentRunner:
         self.logger = Logger(
             name="ExperimentRunner",
             log_dir=os.path.join(cfg.experiment.output_dir, cfg.experiment.name),
-            console_output=True,
+            console=True,
         )
         self.results: List[Dict[str, Any]] = []
 

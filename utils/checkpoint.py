@@ -25,12 +25,15 @@ class CheckpointManager:
     def __init__(
         self,
         ckpt_dir: str,
-        experiment_name: str,
+        experiment_name: str = "",
         metric_name: str = "val/f1",
         mode: str = "max",          # "max" | "min"
         max_to_keep: int = 3,
     ):
-        self.ckpt_dir = os.path.join(ckpt_dir, experiment_name)
+        if experiment_name:
+            self.ckpt_dir = os.path.join(ckpt_dir, experiment_name)
+        else:
+            self.ckpt_dir = ckpt_dir
         self.metric_name = metric_name
         self.mode = mode
         self.max_to_keep = max_to_keep
