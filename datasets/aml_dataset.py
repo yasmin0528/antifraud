@@ -117,15 +117,24 @@ def preprocess_data(
         smote = SMOTE(sampling_strategy=smote_ratio, random_state=42)
         features_resampled, labels_resampled = smote.fit_resample(features, labels)
 
-        df_resampled = pd.DataFrame(
-            features_resampled,
+        # 保存原始的非 SMOTE 数据（用于滑动窗口构建序列）
+        df_original = df.copy()
+        # SMOTE 合成样本作为独立样本，不经过 groupby 滑动窗口
+        df_smote = pd.DataFrame(
+            features_resampled[len(df_original):],  # 只取 SMOTE 合成的新样本
             columns=["TX_AMOUNT_NORM", "TX_TYPE_ID", "TIME_DIFF", "SENDER_IDX", "RECEIVER_IDX", "ALERT_IDX"],
         )
-        df_resampled["IS_FRAUD"] = labels_resampled
-        df_resampled["TX_ID"] = np.arange(len(df_resampled))
-        df_resampled["TIMESTAMP"] = np.arange(len(df_resampled))
-        df = df_resampled
-        print(f"After SMOTE: {len(df)} samples, fraud ratio: {df['IS_FRAUD'].mean():.3f}")
+        df_smote["IS_FRAUD"] = labels_resampled[len(df_original):]
+        # 给 SMOTE 样本分配唯一的虚拟账户 ID，避免 groupby 时混在一起
+        max_sender = int(df_original["SENDER_IDX"].max()) + 1
+        df_smote["SENDER_ACCOUNT_ID"] = ["SMOTE_" + str(i) for i in range(len(df_smote))]
+        df_smote["TX_ID"] = np.arange(len(df_smote))
+        df_smote["TIMESTAMP"] = np.arange(len(df_smote))
+
+        # 原始真实数据保持滑动窗口，SMOTE 数据作为独立样本添加到窗口结果中
+        df = df_original
+        print(f"After SMOTE: {len(df_original)} original + {len(df_smote)} synthetic samples, "
+              f"total fraud ratio: {(df_original['IS_FRAUD'].sum() + df_smote['IS_FRAUD'].sum()) / (len(df_original) + len(df_smote)):.3f}")
     elif use_smote and not _HAS_SMOTE:
         print("SMOTE requested but imblearn not available. Skipping SMOTE.")
 
@@ -152,6 +161,21 @@ def preprocess_data(
             edge_attrs.append(
                 [float(window["TX_AMOUNT_NORM"].iat[-1]), float(window["TX_TYPE_ID"].iat[-1])]
             )
+
+    # 将 SMOTE 合成样本作为独立序列添加到结果中
+    if use_smote and _HAS_SMOTE:
+        for i in range(len(df_smote)):
+            row = df_smote.iloc[i]
+            # 每行特征复制 window_size 次作为序列
+            feat = np.array([row["TX_AMOUNT_NORM"], row["TX_TYPE_ID"], row["TIME_DIFF"]], dtype=np.float32)
+            seq = np.tile(feat, (window_size, 1))
+            sequences.append(seq)
+            labels_list.append(int(row["IS_FRAUD"]))
+            sender_indices.append(int(row["SENDER_IDX"]))
+            receiver_indices.append(int(row["RECEIVER_IDX"]))
+            alert_indices.append(int(row["ALERT_IDX"]))
+            edge_attrs.append([float(row["TX_AMOUNT_NORM"]), float(row["TX_TYPE_ID"])])
+        print(f"Total after sliding window + SMOTE: {len(sequences)} samples")
 
     if len(sequences) == 0:
         raise ValueError(
