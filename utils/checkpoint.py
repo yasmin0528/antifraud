@@ -56,23 +56,16 @@ class CheckpointManager:
         metric_value: Optional[float] = None,
         is_best: bool = False,
     ):
-        """保存 checkpoint。"""
+        """保存 checkpoint（仅保留 latest.pt，不保留 epoch_*.pt 避免磁盘膨胀）。"""
         # 始终保存最新
         latest_path = os.path.join(self.ckpt_dir, "latest.pt")
         torch.save(state, latest_path)
-
-        # Epoch 级保存
-        epoch_path = os.path.join(self.ckpt_dir, f"epoch_{epoch:04d}.pt")
-        torch.save(state, epoch_path)
 
         # 如果指定了指标，更新最佳
         if metric_value is not None and self._is_better(metric_value):
             self.best_metric = metric_value
             self.best_path = os.path.join(self.ckpt_dir, "best.pt")
             torch.save(state, self.best_path)
-
-        # 清理旧 checkpoint
-        self._cleanup()
 
     def save_best(self, state: Dict[str, Any], metric_value: float):
         """显式保存最佳模型。"""

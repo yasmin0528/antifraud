@@ -14,6 +14,7 @@ from sklearn.metrics import (
     recall_score,
     f1_score,
     roc_auc_score,
+    average_precision_score,
     confusion_matrix,
     roc_curve,
     precision_recall_curve,
@@ -64,6 +65,13 @@ class ClassificationMetrics:
             return None
 
     @property
+    def ap(self) -> Optional[float]:
+        try:
+            return average_precision_score(self.y_true, self.y_prob)
+        except ValueError:
+            return None
+
+    @property
     def confusion(self) -> np.ndarray:
         return confusion_matrix(self.y_true, self.y_pred)
 
@@ -74,6 +82,7 @@ class ClassificationMetrics:
             "recall": self.recall,
             "f1": self.f1,
             "auc": self.auc if self.auc is not None else float("nan"),
+            "ap": self.ap if self.ap is not None else float("nan"),
             "threshold": self.threshold,
         }
 

@@ -246,10 +246,11 @@ def main():
     overrides = build_overrides(args)
     cfg = setup_experiment(args.config, overrides)
 
-    # 记录配置
+    # 记录配置（仅控制台，文件日志由 base_trainer 负责）
     logger = Logger(
         name="train",
         log_dir=os.path.join(cfg.experiment.output_dir, cfg.experiment.name),
+        log_file=False,
     )
     logger.info(f"Config: {args.config}")
     logger.info(f"Experiment: {cfg.experiment.name}")

@@ -61,15 +61,17 @@ class BaseTrainer:
         )
         os.makedirs(self.output_dir, exist_ok=True)
 
-        # 日志
+        # 日志（使用同目录，Logger 内部通过 name 区分文件）
         self.logger = Logger(
             log_dir=self.output_dir,
             name=cfg.experiment.name,
             console=True,
         )
+        # TensorBoard 单独子目录，避免事件文件与其他 Logger 混淆
+        tb_dir = os.path.join(self.output_dir, "tensorboard")
         self.tb_logger = Logger(
-            log_dir=self.output_dir,
-            name=f"{cfg.experiment.name}_tb",
+            log_dir=tb_dir,
+            name=cfg.experiment.name,
             console=False,
         )
 
@@ -183,6 +185,7 @@ class BaseTrainer:
                 llm_config=llm_config,
                 use_llm=use_llm,
             ).to(self.device)
+            mpfc.set_output_dir(self.output_dir)
             llm_status = "with LLM" if use_llm else "without LLM (ablation)"
             self.models["mpfc"] = mpfc
             self.logger.info(
@@ -535,14 +538,15 @@ class BaseTrainer:
             log_msg = (
                 f"Epoch {epoch}/{cfg.train.epochs} | "
                 f"time={epoch_time:.1f}s | "
-                f"loss={avg_loss:.6f} | "
                 f"train_f1={train_metrics['f1']:.4f} | "
-                f"train_auc={train_metrics.get('auc', float('nan')):.4f}"
+                f"train_auc={train_metrics.get('auc', float('nan')):.4f} | "
+                f"train_ap={train_metrics.get('ap', float('nan')):.4f}"
             )
             if val_metrics:
                 log_msg += (
                     f" | val_f1={val_metrics['f1']:.4f} | "
                     f"val_auc={val_metrics.get('auc', float('nan')):.4f} | "
+                    f"val_ap={val_metrics.get('ap', float('nan')):.4f} | "
                     f"val_thr={val_threshold:.2f}"
                 )
             self.logger.info(log_msg)
@@ -594,7 +598,8 @@ class BaseTrainer:
                 f"F1={test_metrics['f1']:.4f}, "
                 f"PREC={test_metrics['precision']:.4f}, "
                 f"REC={test_metrics['recall']:.4f}, "
-                f"AUC={test_metrics.get('auc', float('nan')):.4f}"
+                f"AUC={test_metrics.get('auc', float('nan')):.4f}, "
+                f"AP={test_metrics.get('ap', float('nan')):.4f}"
             )
 
             # TensorBoard
@@ -733,7 +738,8 @@ class BaseTrainer:
         self.logger.info(
             f"Test: ACC={test_metrics['acc']:.4f}, "
             f"F1={test_metrics['f1']:.4f}, "
-            f"AUC={test_metrics.get('auc', float('nan')):.4f}"
+            f"AUC={test_metrics.get('auc', float('nan')):.4f}, "
+            f"AP={test_metrics.get('ap', float('nan')):.4f}"
         )
         return test_metrics
 

@@ -41,6 +41,7 @@ class ExperimentRunner:
             name="ExperimentRunner",
             log_dir=os.path.join(cfg.experiment.output_dir, cfg.experiment.name),
             console=True,
+            log_file=False,
         )
         self.results: List[Dict[str, Any]] = []
 

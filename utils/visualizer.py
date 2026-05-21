@@ -24,8 +24,14 @@ import matplotlib.pyplot as plt
 from sklearn.metrics import roc_curve, precision_recall_curve, confusion_matrix, auc
 from sklearn.manifold import TSNE
 
-# 中文字体支持（如果可用）
-plt.rcParams["font.family"] = ["DejaVu Sans", "SimHei", "Arial Unicode MS"]
+# 中文字体支持（如果可用）；无中文环境的 Linux 自动回退 DejaVu Sans
+import matplotlib.font_manager as _fm
+_available_fonts = {f.name for f in _fm.fontManager.ttflist}
+_font_list = ["DejaVu Sans"]
+for _font in ["SimHei", "Arial Unicode MS"]:
+    if _font in _available_fonts:
+        _font_list.append(_font)
+plt.rcParams["font.family"] = _font_list
 plt.rcParams["axes.unicode_minus"] = False
 
 

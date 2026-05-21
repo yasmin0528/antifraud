@@ -29,24 +29,27 @@ class Logger:
         name: str = "aml",
         level: int = logging.INFO,
         console: bool = True,
+        log_file: bool = True,
     ):
         self.log_dir = log_dir
-        os.makedirs(log_dir, exist_ok=True)
+        if log_file:
+            os.makedirs(log_dir, exist_ok=True)
 
         # Python logger
         self._logger = logging.getLogger(name)
         self._logger.setLevel(level)
         self._logger.handlers.clear()
 
-        # 文件 handler
-        log_path = os.path.join(log_dir, f"{name}.log")
-        fh = logging.FileHandler(log_path, encoding="utf-8")
-        fh.setLevel(level)
-        fh.setFormatter(logging.Formatter(
-            "%(asctime)s | %(levelname)s | %(message)s",
-            datefmt="%Y-%m-%d %H:%M:%S",
-        ))
-        self._logger.addHandler(fh)
+        # 文件 handler（仅在 log_file=True 时创建）
+        if log_file:
+            log_path = os.path.join(log_dir, f"{name}.log")
+            fh = logging.FileHandler(log_path, encoding="utf-8")
+            fh.setLevel(level)
+            fh.setFormatter(logging.Formatter(
+                "%(asctime)s | %(levelname)s | %(message)s",
+                datefmt="%Y-%m-%d %H:%M:%S",
+            ))
+            self._logger.addHandler(fh)
 
         # 控制台 handler
         if console:
