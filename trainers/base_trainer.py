@@ -71,7 +71,7 @@ class BaseTrainer:
         tb_dir = os.path.join(self.output_dir, "tensorboard")
         self.tb_logger = Logger(
             log_dir=tb_dir,
-            name=cfg.experiment.name,
+            name=f"{cfg.experiment.name}_tb",
             console=False,
         )
 

@@ -11,9 +11,6 @@
     # 基础实验
     python train.py --config configs/default.yaml
 
-    # 默认实验（LLM 为 mPFC 内置组件）
-    python train.py --config configs/default.yaml --llm_api_url http://localhost:11434/v1/chat/completions
-
     # 消融实验
     python train.py --config configs/default.yaml --ablation
 
@@ -79,7 +76,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--hidden_dim", type=int, default=None)
     parser.add_argument("--dropout", type=float, default=None)
 
-    # LLM 参数（LLM 是 mPFC 内置组件）
+    # LLM 参数
     parser.add_argument("--llm_api_url", type=str, default=None, help="LLM API URL（mPFC 内置 LLM 规则生成接口）")
     parser.add_argument("--llm_model_name", type=str, default=None, help="LLM 模型名称")
     parser.add_argument("--llm_update_freq", type=int, default=None, help="LLM 规则更新频率")
