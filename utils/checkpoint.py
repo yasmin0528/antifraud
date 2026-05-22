@@ -30,10 +30,8 @@ class CheckpointManager:
         mode: str = "max",          # "max" | "min"
         max_to_keep: int = 3,
     ):
-        if experiment_name:
-            self.ckpt_dir = os.path.join(ckpt_dir, experiment_name)
-        else:
-            self.ckpt_dir = ckpt_dir
+        # ckpt_dir 由调用方（BaseTrainer）决定，不再二次嵌套
+        self.ckpt_dir = ckpt_dir
         self.metric_name = metric_name
         self.mode = mode
         self.max_to_keep = max_to_keep

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import os
 import time
+from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
@@ -55,33 +56,51 @@ class BaseTrainer:
         self.cfg = cfg
         self.device = self._resolve_device()
 
-        # 输出目录
-        self.output_dir = os.path.join(
-            cfg.experiment.output_dir, cfg.experiment.name
-        )
+        # --------------------------------------------------
+        # 输出目录结构：
+        #   <output_dir>/<exp_name>/run_YYYYMMDD_HHMMSS/
+        #     log/          - 日志文件
+        #     figures/      - 可视化图表
+        #     ckpt/         - 模型 checkpoint
+        #     tensorboard/  - TensorBoard 事件
+        #     results/      - 结果 CSV
+        # --------------------------------------------------
+        exp_root = os.path.join(cfg.experiment.output_dir, cfg.experiment.name)
+
+        # 每次运行生成唯一时间戳子目录
+        run_suffix = datetime.now().strftime("run_%Y%m%d_%H%M%S")
+        self.output_dir = os.path.join(exp_root, run_suffix)
         os.makedirs(self.output_dir, exist_ok=True)
 
-        # 日志（使用同目录，Logger 内部通过 name 区分文件）
+        # 子目录
+        self.log_dir = os.path.join(self.output_dir, "log")
+        self.fig_dir = os.path.join(self.output_dir, "figures")
+        self.ckpt_dir = os.path.join(self.output_dir, "ckpt")
+        self.tb_dir = os.path.join(self.output_dir, "tensorboard")
+        self.results_dir = os.path.join(self.output_dir, "results")
+
+        for d in (self.log_dir, self.fig_dir, self.ckpt_dir, self.tb_dir, self.results_dir):
+            os.makedirs(d, exist_ok=True)
+
+        # 日志（主日志放在 log/ 下）
         self.logger = Logger(
-            log_dir=self.output_dir,
+            log_dir=self.log_dir,
             name=cfg.experiment.name,
             console=True,
         )
-        # TensorBoard 单独子目录，避免事件文件与其他 Logger 混淆
-        tb_dir = os.path.join(self.output_dir, "tensorboard")
+        # TensorBoard 单独子目录
         self.tb_logger = Logger(
-            log_dir=tb_dir,
+            log_dir=self.tb_dir,
             name=f"{cfg.experiment.name}_tb",
             console=False,
         )
 
-        # 可视化
-        self.visualizer = Visualizer(save_dir=self.output_dir)
+        # 可视化 -> figures/
+        self.visualizer = Visualizer(save_dir=self.fig_dir)
 
-        # Checkpoint
+        # Checkpoint -> ckpt/（直接写，不再双重嵌套）
         self.ckpt_manager = CheckpointManager(
-            ckpt_dir=self.output_dir,
-            experiment_name=cfg.experiment.name,
+            ckpt_dir=self.ckpt_dir,
         )
 
         # 数据
@@ -185,7 +204,7 @@ class BaseTrainer:
                 llm_config=llm_config,
                 use_llm=use_llm,
             ).to(self.device)
-            mpfc.set_output_dir(self.output_dir)
+            mpfc.set_output_dir(self.output_dir)  # LLM 规则文件放在 run_xxx/ 根目录
             llm_status = "with LLM" if use_llm else "without LLM (ablation)"
             self.models["mpfc"] = mpfc
             self.logger.info(
@@ -620,6 +639,7 @@ class BaseTrainer:
             "val_metrics": val_metrics or {},
             "test_metrics": test_metrics,
             "train_time": train_time,
+            "results_dir": self.results_dir,
         }
 
     def _visualize(self):
@@ -632,7 +652,7 @@ class BaseTrainer:
 
         # Loss curve
         if cfg.plot_loss:
-            log_path = os.path.join(self.output_dir, f"{self.cfg.experiment.name}.log")
+            log_path = os.path.join(self.log_dir, f"{self.cfg.experiment.name}.log")
             train_losses = self._extract_losses_from_log(log_path)
             if train_losses:
                 self.visualizer.plot_loss_curve(
@@ -693,7 +713,7 @@ class BaseTrainer:
                 )
 
                 # Log to tensorboard
-                self.tb_logger.log_figure("roc_curve", os.path.join(self.output_dir, "roc_curve.png"))
+                self.tb_logger.log_figure("roc_curve", os.path.join(self.fig_dir, "roc_curve.png"))
             except Exception as e:
                 self.logger.warning(f"ROC/PR visualization failed: {e}")
 

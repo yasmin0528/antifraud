@@ -3,7 +3,9 @@
     "allow": [
       "Bash(python:*)",
       "Bash(python -m py_compile:*)",
-      "Bash(python -m:*)"
+      "Bash(python -m:*)",
+      "Bash(chmod:*)",
+      "Bash(bash:*)"
     ],
     "deny": [],
     "ask": []

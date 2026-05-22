@@ -235,18 +235,23 @@ class ExperimentRunner:
             )
 
     def _save_results(self):
-        """将实验结果保存为 CSV。"""
+        """将每个实验的结果保存到各自的 results/ 子目录。"""
         if not self.results:
             return
 
-        output_dir = os.path.join(
-            self.cfg.experiment.output_dir, self.cfg.experiment.name
-        )
-        os.makedirs(output_dir, exist_ok=True)
-
-        # 展平结果
-        rows = []
         for result in self.results:
+            # 优先使用 BaseTrainer 返回的 results_dir（run_xxx/results/）
+            results_dir = result.get("results_dir")
+            if not results_dir:
+                # 降级：基于 experiment name 构造（兼容 test 等无 results_dir 的场景）
+                exp_root = os.path.join(
+                    self.cfg.experiment.output_dir,
+                    result.get("config_name", self.cfg.experiment.name),
+                )
+                results_dir = os.path.join(exp_root, "results")
+            os.makedirs(results_dir, exist_ok=True)
+
+            # 展平单条结果
             row = {
                 "config_name": result.get("config_name", ""),
                 "model": result.get("model", ""),
@@ -264,15 +269,43 @@ class ExperimentRunner:
                 for k, v in metrics.items():
                     row[f"{prefix}_{k}"] = v
 
-            rows.append(row)
+            csv_path = os.path.join(results_dir, "results.csv")
+            with open(csv_path, "w", newline="", encoding="utf-8") as f:
+                writer = csv.DictWriter(f, fieldnames=row.keys())
+                writer.writeheader()
+                writer.writerow([row])
 
-        csv_path = os.path.join(output_dir, "results.csv")
-        with open(csv_path, "w", newline="", encoding="utf-8") as f:
-            writer = csv.DictWriter(f, fieldnames=rows[0].keys())
-            writer.writeheader()
-            writer.writerows(rows)
+        # 额外在实验根目录保存一份汇总（所有子运行聚合）
+        exp_root = os.path.join(
+            self.cfg.experiment.output_dir, self.cfg.experiment.name
+        )
+        os.makedirs(exp_root, exist_ok=True)
 
-        self.logger.info(f"Results saved to {csv_path}")
+        all_rows = []
+        for result in self.results:
+            row = {
+                "config_name": result.get("config_name", ""),
+                "model": result.get("model", ""),
+                "seed": result.get("seed", ""),
+                "variant": result.get("variant", ""),
+                "params": str(result.get("params", "")),
+                "best_val_f1": result.get("best_val_f1", ""),
+                "best_threshold": result.get("best_threshold", ""),
+                "train_time": result.get("train_time", ""),
+            }
+            for prefix in ("train_metrics", "val_metrics", "test_metrics"):
+                metrics = result.get(prefix, {})
+                for k, v in metrics.items():
+                    row[f"{prefix}_{k}"] = v
+            all_rows.append(row)
+
+        if all_rows:
+            summary_path = os.path.join(exp_root, "results_summary.csv")
+            with open(summary_path, "w", newline="", encoding="utf-8") as f:
+                writer = csv.DictWriter(f, fieldnames=all_rows[0].keys())
+                writer.writeheader()
+                writer.writerows(all_rows)
+            self.logger.info(f"Results summary saved to {summary_path}")
 
 
 import numpy as np  # noqa: E402 (needed for multi-seed stats)
