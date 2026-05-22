@@ -337,7 +337,7 @@ class ExperimentRunner:
             with open(csv_path, "w", newline="", encoding="utf-8") as f:
                 writer = csv.DictWriter(f, fieldnames=row.keys())
                 writer.writeheader()
-                writer.writerow([row])
+                writer.writerow(row)
 
         # 额外在实验根目录保存一份汇总（所有子运行聚合）
         exp_root = os.path.join(

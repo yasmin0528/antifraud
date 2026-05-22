@@ -190,12 +190,7 @@ run_ablation() {
         "--preprocessed_path" "${PREPROCESSED_PATH}"
     )
 
-    # 方法一：直接使用 ablation 配置文件的简化消融
-    # 注意：这种方法使用 runner.py 内部的 variant_map 自动处理所有消融变体
-    run_cmd "消融实验: 批量运行所有变体 (通过 runner._run_ablation)" \
-        train.py "${BASE_ARGS[@]}" --ablation --name "ablation_all"
-
-    # 方法二：逐一运行每个消融变体（更清晰，可单独观察每个结果）
+    # 逐一运行每个消融变体（每个变体可独立观察结果）
     local ABLATION_CONFIGS=(
         "${CONFIG_DIR}/ablation/wo_ca1.yaml"
         "${CONFIG_DIR}/ablation/wo_ca3.yaml"
