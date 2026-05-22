@@ -3,11 +3,12 @@
 run_experiments.py
 AML 反洗钱模型 —— 全面实验调度与结果汇总脚本。
 
-支持四种实验类型：
-  1. baseline   - 基础实验（完整 MPFC 模型）
-  2. ablation   - 消融实验（逐一移除 CA1/CA3/MPFC/VTA/LLM 模块）
-  3. sensitivity - 参数敏感性实验（batch_size/lr/hidden_dim/dropout/pos_weight）
-  4. multi_seed - 多随机种子实验（5 个种子评估稳定性）
+支持五种实验类型：
+  1. baseline    - 基础实验（完整 MPFC 模型）
+  2. ablation    - 消融实验（逐一移除 CA1/CA3/MPFC/VTA/LLM 模块）
+  3. sensitivity  - 参数敏感性实验（learning_rate/focal_gamma/rpe_beta/memory_momentum）
+  4. vta_decomp   - VTA 损失解耦实验（Focal/RPE/PW 逐组件清零验证）
+  5. multi_seed  - 多随机种子实验（5 个种子评估稳定性）
 
 用法：
     # 运行全部实验
@@ -15,6 +16,9 @@ AML 反洗钱模型 —— 全面实验调度与结果汇总脚本。
 
     # 仅运行消融实验
     python scripts/run_experiments.py --only ablation --llm_api_url <URL>
+
+    # 仅运行 VTA 损失解耦实验（无需 LLM，跑得最快）
+    python scripts/run_experiments.py --only vta_decomp
 
     # 指定数据路径
     python scripts/run_experiments.py --data_path /path/to/dataset.csv
@@ -58,11 +62,10 @@ ABLATION_VARIANTS = [
 ]
 
 SENSITIVITY_VARIANTS = [
-    "batch_size",
     "learning_rate",
-    "hidden_dim",
-    "dropout",
-    "pos_weight",
+    "focal_gamma",
+    "rpe_beta",
+    "memory_momentum",
 ]
 
 MULTI_SEEDS = [42, 123, 456, 789, 1111]
@@ -174,6 +177,26 @@ class ExperimentManager:
             self.run_cmd(f"参数敏感性: {variant}", args)
 
         print("  [参数敏感性实验完成]")
+
+    # -------- VTA 损失解耦实验 --------
+    def run_vta_decomp(self):
+        print()
+        print("█" * 70)
+        print("  VTA 损失解耦实验 - Focal / RPE / PW 逐组件清零验证")
+        print("█" * 70)
+
+        config_file = CONFIG_DIR / "vta_decomposition.yaml"
+        if not config_file.exists():
+            print(f"  [SKIP] Config not found: {config_file}")
+            return
+
+        args = self._base_args() + [
+            "--config", str(config_file),
+            "--name", "vta_decomp",
+        ]
+        self.run_cmd("VTA 损失解耦: 5 个变体 (full / wo_focal / wo_rpe / wo_pw / bce_only)", args)
+
+        print("  [VTA 损失解耦实验完成]")
 
     # -------- 多随机种子实验 --------
     def run_multi_seed(self):
@@ -322,6 +345,8 @@ class ExperimentManager:
                 self.run_ablation()
             elif only == "sensitivity":
                 self.run_sensitivity()
+            elif only == "vta_decomp":
+                self.run_vta_decomp()
             elif only == "multi_seed":
                 self.run_multi_seed()
             else:
@@ -331,6 +356,7 @@ class ExperimentManager:
             self.run_baseline()
             self.run_ablation()
             self.run_sensitivity()
+            self.run_vta_decomp()
             self.run_multi_seed()
 
         if not self.args.no_summarize:
@@ -371,7 +397,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--epochs", type=int, default=10,
                         help="Number of epochs for baseline (default: 10)")
 
-    parser.add_argument("--only", type=str, choices=["baseline", "ablation", "sensitivity", "multi_seed"],
+    parser.add_argument("--only", type=str, choices=["baseline", "ablation", "sensitivity", "vta_decomp", "multi_seed"],
                         help="Run only one experiment type")
     parser.add_argument("--no_summarize", action="store_true",
                         help="Skip final summary")

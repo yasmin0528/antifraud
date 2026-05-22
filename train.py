@@ -23,6 +23,12 @@
     # 推理测试
     python train.py --config configs/default.yaml --test --checkpoint outputs/model_best.pt
 
+    # 断点续训（自动找最新 checkpoint）
+    python train.py --config configs/default.yaml --resume
+
+    # 断点续训（指定 checkpoint 路径）
+    python train.py --config configs/default.yaml --resume outputs/exp_name/run_xxx/ckpt/latest.pt
+
     # 快速覆盖
     python train.py --config configs/default.yaml --epochs 20 --lr 0.0005 --batch_size 64
 """
@@ -61,6 +67,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--sweep", action="store_true",
         help="运行参数敏感性扫描",
+    )
+    parser.add_argument(
+        "--resume", nargs="?", const="auto", default=None,
+        help='断点续训。不传值 = 自动找最新的 latest.pt; 传路径 = 使用指定 checkpoint',
     )
     parser.add_argument(
         "--test", action="store_true",
@@ -122,6 +132,11 @@ def build_overrides(args: argparse.Namespace) -> Dict:
         overrides["multi_seed"] = {"enabled": True}
     if args.sweep:
         overrides["sweep"] = {"enabled": True}
+    if args.resume is not None:
+        overrides["experiment"] = {"mode": "resume"}
+        if args.resume != "auto":
+            # 显式指定了 checkpoint 路径
+            overrides["experiment"]["resume_ckpt"] = args.resume
     if args.test:
         overrides["experiment"] = {"mode": "test"}
 
@@ -260,6 +275,13 @@ def main():
         logger.info(f"Test mode with checkpoint: {args.checkpoint}")
         trainer = BaseTrainer(cfg)
         trainer.test(checkpoint_path=args.checkpoint)
+    elif args.resume:
+        # 断点续训模式
+        from trainers.base_trainer import BaseTrainer
+
+        logger.info(f"Resume mode: {cfg.experiment.name}")
+        trainer = BaseTrainer(cfg, resume=True)
+        trainer.train()
     else:
         # 正常实验模式
         runner = ExperimentRunner(cfg, config_path=args.config)

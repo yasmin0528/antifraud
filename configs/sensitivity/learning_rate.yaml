@@ -1,4 +1,4 @@
-# 参数敏感性实验：learning_rate
+# 参数敏感性实验：learning_rate (学习率)
 experiment:
   name: "sweep_lr"
   seed: 42

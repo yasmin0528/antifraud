@@ -52,9 +52,11 @@ class BaseTrainer:
     5. 日志 + Checkpoint + 可视化
     """
 
-    def __init__(self, cfg: Config):
+    def __init__(self, cfg: Config, resume: bool = False):
         self.cfg = cfg
         self.device = self._resolve_device()
+        self.resume = resume
+        self.resume_ckpt = getattr(cfg.experiment, "resume_ckpt", None)
 
         # --------------------------------------------------
         # 输出目录结构：
@@ -67,10 +69,23 @@ class BaseTrainer:
         # --------------------------------------------------
         exp_root = os.path.join(cfg.experiment.output_dir, cfg.experiment.name)
 
-        # 每次运行生成唯一时间戳子目录
-        run_suffix = datetime.now().strftime("run_%Y%m%d_%H%M%S")
-        self.output_dir = os.path.join(exp_root, run_suffix)
-        os.makedirs(self.output_dir, exist_ok=True)
+        if resume:
+            if self.resume_ckpt:
+                # 指定了 checkpoint 路径，从路径推断 run 目录
+                # run_xxx/ckpt/latest.pt → run_xxx
+                self.output_dir = os.path.dirname(os.path.dirname(self.resume_ckpt))
+            else:
+                # 自动找最新的 run_* 目录
+                self.output_dir = self._find_latest_run_dir(exp_root)
+                if self.output_dir is None:
+                    raise FileNotFoundError(
+                        f"No existing run directory found under {exp_root} for --resume."
+                    )
+        else:
+            # 正常训练：创建新的时间戳子目录
+            run_suffix = datetime.now().strftime("run_%Y%m%d_%H%M%S")
+            self.output_dir = os.path.join(exp_root, run_suffix)
+            os.makedirs(self.output_dir, exist_ok=True)
 
         # 子目录
         self.log_dir = os.path.join(self.output_dir, "log")
@@ -119,6 +134,20 @@ class BaseTrainer:
         self.best_threshold = 0.5
         self.patience_counter = 0
         self.global_step = 0
+
+    @staticmethod
+    def _find_latest_run_dir(exp_root: str) -> Optional[str]:
+        """在 <output_dir>/<exp_name>/ 下查找最新的 run_* 目录。"""
+        if not os.path.exists(exp_root):
+            return None
+        run_dirs = [
+            d for d in os.listdir(exp_root)
+            if d.startswith("run_") and os.path.isdir(os.path.join(exp_root, d))
+        ]
+        if not run_dirs:
+            return None
+        run_dirs.sort(reverse=True)
+        return os.path.join(exp_root, run_dirs[0])
 
     def _resolve_device(self) -> torch.device:
         cfg_device = self.cfg.experiment.device
@@ -512,10 +541,48 @@ class BaseTrainer:
         # 构建模型
         self._build_models()
 
-        self.logger.info(f"Starting training for {cfg.train.epochs} epochs...")
+        # 断点续训：从 checkpoint 恢复模型和优化器状态
+        start_epoch = 1
+        resume_ok = False
+        if self.resume:
+            if self.resume_ckpt:
+                # 从指定路径加载
+                if os.path.exists(self.resume_ckpt):
+                    ckpt = torch.load(self.resume_ckpt, map_location=self.device)
+                    resume_ok = ckpt is not None and "model_state_dict" in ckpt
+                    if not resume_ok:
+                        self.logger.warning(f"Invalid checkpoint: {self.resume_ckpt}")
+                else:
+                    self.logger.warning(f"Checkpoint not found: {self.resume_ckpt}")
+            elif self.ckpt_manager.has_checkpoint():
+                ckpt = self.ckpt_manager.load_latest(self.device)
+                resume_ok = ckpt is not None and "model_state_dict" in ckpt
+
+        if resume_ok:
+            state_dicts = ckpt["model_state_dict"]
+            for name, state_dict in state_dicts.items():
+                if name in self.models:
+                    self.models[name].load_state_dict(state_dict)
+            if "optimizer_state_dict" in ckpt and self.optimizer is not None:
+                self.optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+            start_epoch = ckpt.get("epoch", 0) + 1
+            self.global_step = ckpt.get("global_step", 0)
+            self.best_val_f1 = ckpt.get("best_val_f1", -1.0)
+            self.best_threshold = ckpt.get("best_threshold", 0.5)
+            self.patience_counter = ckpt.get("patience_counter", 0)
+            self.logger.info(
+                f"Resumed from checkpoint: epoch {ckpt.get('epoch', 0)}, "
+                f"global_step {self.global_step}, "
+                f"best_val_f1 {self.best_val_f1:.4f}"
+            )
+        else:
+            if self.resume:
+                self.logger.warning("Checkpoint not found or invalid, starting from scratch.")
+            self.logger.info(f"Starting training for {cfg.train.epochs} epochs...")
+
         train_start = time.time()
 
-        for epoch in range(1, cfg.train.epochs + 1):
+        for epoch in range(start_epoch, cfg.train.epochs + 1):
             self.current_epoch = epoch
             epoch_start = time.time()
 
@@ -534,10 +601,16 @@ class BaseTrainer:
 
                     # 保存最佳 checkpoint
                     state_dicts = {name: m.state_dict() for name, m in self.models.items()}
-                    self.ckpt_manager.save_best(
-                        {"model_state_dict": state_dicts, "epoch": epoch},
-                        val_metrics["f1"],
-                    )
+                    ckpt_data = {
+                        "model_state_dict": state_dicts,
+                        "optimizer_state_dict": self.optimizer.state_dict() if self.optimizer else None,
+                        "epoch": epoch,
+                        "global_step": self.global_step,
+                        "best_val_f1": self.best_val_f1,
+                        "best_threshold": self.best_threshold,
+                        "patience_counter": self.patience_counter,
+                    }
+                    self.ckpt_manager.save_best(ckpt_data, val_metrics["f1"])
                 else:
                     self.patience_counter += 1
             else:
@@ -546,9 +619,17 @@ class BaseTrainer:
 
             # 保存最新 checkpoint
             state_dicts = {name: m.state_dict() for name, m in self.models.items()}
+            ckpt_data = {
+                "model_state_dict": state_dicts,
+                "optimizer_state_dict": self.optimizer.state_dict() if self.optimizer else None,
+                "epoch": epoch,
+                "global_step": self.global_step,
+                "best_val_f1": self.best_val_f1,
+                "best_threshold": self.best_threshold,
+                "patience_counter": self.patience_counter,
+            }
             self.ckpt_manager.save(
-                {"model_state_dict": state_dicts, "epoch": epoch},
-                epoch=epoch, step=self.global_step,
+                ckpt_data, epoch=epoch, step=self.global_step,
             )
 
             epoch_time = time.time() - epoch_start

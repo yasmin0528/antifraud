@@ -54,7 +54,7 @@ class CheckpointManager:
         metric_value: Optional[float] = None,
         is_best: bool = False,
     ):
-        """保存 checkpoint（仅保留 latest.pt，不保留 epoch_*.pt 避免磁盘膨胀）。"""
+        """保存 checkpoint。"""
         # 始终保存最新
         latest_path = os.path.join(self.ckpt_dir, "latest.pt")
         torch.save(state, latest_path)
@@ -70,6 +70,10 @@ class CheckpointManager:
         self.best_metric = metric_value
         self.best_path = os.path.join(self.ckpt_dir, "best.pt")
         torch.save(state, self.best_path)
+
+    def has_checkpoint(self) -> bool:
+        """检查是否存在最新 checkpoint。"""
+        return os.path.exists(os.path.join(self.ckpt_dir, "latest.pt"))
 
     def load_latest(self, device: str = "cpu") -> Optional[Dict[str, Any]]:
         """加载最新 checkpoint。"""

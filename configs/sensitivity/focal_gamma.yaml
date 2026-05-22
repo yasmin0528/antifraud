@@ -1,0 +1,14 @@
+# 参数敏感性实验：focal_gamma (聚焦损失系数)
+# 控制困难样本的关注程度。gamma=0 退化为标准 BCE。
+experiment:
+  name: "sweep_focal_gamma"
+  seed: 42
+
+sweep:
+  enabled: true
+  method: "grid"
+  params:
+    focal_gamma: [0.0, 0.5, 1.0, 2.0, 4.0]
+
+train:
+  epochs: 5

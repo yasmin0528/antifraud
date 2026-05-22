@@ -5,7 +5,8 @@
       "Bash(python -m py_compile:*)",
       "Bash(python -m:*)",
       "Bash(chmod:*)",
-      "Bash(bash:*)"
+      "Bash(bash:*)",
+      "Bash(pip install:*)"
     ],
     "deny": [],
     "ask": []

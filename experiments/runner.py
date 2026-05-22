@@ -6,7 +6,8 @@
 2. ablation - 消融实验（移除模块对比）
 3. sweep    - 参数敏感性扫描（grid search）
 4. multi_seed - 多随机种子重复实验
-5. test     - 推理测试
+5. vta_decomp - VTA 损失解耦实验（逐组件清零验证）
+6. test     - 推理测试
 """
 
 from __future__ import annotations
@@ -19,6 +20,7 @@ import time
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
+import numpy as np
 import torch
 
 from trainers.base_trainer import BaseTrainer
@@ -66,6 +68,12 @@ class ExperimentRunner:
             self.logger.info(f"Params={cfg.sweep.params}")
             self.logger.info("=" * 60)
             self._run_sweep()
+
+        elif cfg.vta_decomp.enabled:
+            self.logger.info("=" * 60)
+            self.logger.info("VTA loss decomposition experiment")
+            self.logger.info("=" * 60)
+            self._run_vta_decomp()
 
         elif cfg.ablation.enabled:
             self.logger.info("=" * 60)
@@ -179,13 +187,15 @@ class ExperimentRunner:
                     model_override["ca3"] = {"emb_dim": value}
                 elif key == "dropout":
                     model_override["dropout"] = value
-                elif key in ("pos_weight", "focal_gamma", "gnn_layers", "gnn_heads"):
-                    if key in ("pos_weight", "focal_gamma"):
+                elif key in ("pos_weight", "focal_gamma", "rpe_beta", "gnn_layers", "gnn_heads"):
+                    if key in ("pos_weight", "focal_gamma", "rpe_beta"):
                         train_override[key] = value
                     elif key == "gnn_layers":
                         model_override["mpfc"] = {"gnn_layers": value}
                     elif key == "gnn_heads":
                         model_override["mpfc"] = {"gnn_heads": value}
+                elif key == "memory_momentum":
+                    model_override["ca3"] = {"memory_momentum": value}
                 else:
                     train_override[key] = value
 
@@ -204,6 +214,44 @@ class ExperimentRunner:
 
             result = self._run_single(cfg)
             result["params"] = params
+            self.results.append(result)
+
+    def _run_vta_decomp(self):
+        """运行 VTA 损失解耦实验：逐组件清零验证。
+
+        每个变体覆盖 train 下的 focal_gamma / rpe_beta / pos_weight，
+        其他配置保持不变。类似消融实验的思路，但只修改损失函数参数而非移除模块。
+        """
+        variants = self.cfg.vta_decomp.variants
+
+        for variant in variants:
+            name = variant["name"]
+            self.logger.info("-" * 40)
+            self.logger.info(
+                f"VTA variant: {name} "
+                f"(focal_gamma={variant['focal_gamma']}, "
+                f"rpe_beta={variant['rpe_beta']}, "
+                f"pos_weight={variant['pos_weight']})"
+            )
+            self.logger.info("-" * 40)
+
+            cfg = copy.deepcopy(self.cfg)
+            cfg = merge_config(cfg, {
+                "train": {
+                    "focal_gamma": variant["focal_gamma"],
+                    "rpe_beta": variant["rpe_beta"],
+                    "pos_weight": variant["pos_weight"],
+                }
+            })
+            cfg.experiment.name = f"{self.cfg.experiment.name}_{name}"
+
+            result = self._run_single(cfg)
+            result["variant"] = name
+            result["params"] = str({
+                "focal_gamma": variant["focal_gamma"],
+                "rpe_beta": variant["rpe_beta"],
+                "pos_weight": variant["pos_weight"],
+            })
             self.results.append(result)
 
     def _run_multi_seed(self):
@@ -308,4 +356,3 @@ class ExperimentRunner:
             self.logger.info(f"Results summary saved to {summary_path}")
 
 
-import numpy as np  # noqa: E402 (needed for multi-seed stats)

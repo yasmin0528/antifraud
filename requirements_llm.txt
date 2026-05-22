@@ -1,0 +1,18 @@
+# requirements_llm.txt
+
+```txt
+torch==2.5.1+cu124
+torchvision==0.20.1+cu124
+torchaudio==2.5.1+cu124
+vllm==0.8.5
+transformers==4.51.3
+accelerate
+sentencepiece
+einops
+tiktoken
+protobuf
+xformers==0.0.28.post3
+fastapi
+uvicorn
+openai
+```

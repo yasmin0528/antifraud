@@ -1,0 +1,45 @@
+# ============================================================
+# VTA 损失解耦实验
+#
+# 逐组件清零以验证每个神经调制机制的贡献：
+#   loss = BCE * Focal(1-pt)^gamma * RPE(1+beta*|y-prob|) * PW
+#
+# 变体定义见 run_experiments.py 中的 VTA_DECOMP_VARIANTS
+# ============================================================
+experiment:
+  name: "vta_decomp"
+  seed: 42
+
+train:
+  epochs: 5
+
+ablation:
+  enabled: false
+  remove_modules: []
+  variants: []
+
+# 下面是每个变体的具体参数，由 ExperimentRunner 的 _run_vta_decomp()
+# 方法读取后逐一覆盖运行。所有变体共享相同的 base config。
+vta_decomp:
+  enabled: true
+  variants:
+    - name: "full"          # 完整 VTA
+      focal_gamma: 2.0
+      rpe_beta: 1.5
+      pos_weight: 5.0
+    - name: "wo_focal"      # 去掉 Focal 调制 (gamma=0 → focal=1)
+      focal_gamma: 0.0
+      rpe_beta: 1.5
+      pos_weight: 5.0
+    - name: "wo_rpe"        # 去掉多巴胺 RPE 调制 (beta=0 → da=1)
+      focal_gamma: 2.0
+      rpe_beta: 0.0
+      pos_weight: 5.0
+    - name: "wo_pw"         # 去掉正类加权 (pos_weight=1.0 → pw=1)
+      focal_gamma: 2.0
+      rpe_beta: 1.5
+      pos_weight: 1.0
+    - name: "bce_only"      # 纯 BCE (所有调制清零)
+      focal_gamma: 0.0
+      rpe_beta: 0.0
+      pos_weight: 1.0

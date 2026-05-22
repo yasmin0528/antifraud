@@ -1,0 +1,14 @@
+# 参数敏感性实验：memory_momentum (CA3记忆库动量系数)
+# 控制联想记忆的更新速度。momentum=0 无记忆，momentum→1 记忆更新极慢。
+experiment:
+  name: "sweep_memory_momentum"
+  seed: 42
+
+sweep:
+  enabled: true
+  method: "grid"
+  params:
+    memory_momentum: [0.0, 0.5, 0.7, 0.9, 0.99]
+
+train:
+  epochs: 5

@@ -1,4 +1,24 @@
 # antifraud
+环境配置
+安装：
+
+```bash
+pip install -r requirements_llm.txt
+```bash
+pip install -r requirements_antifraud.txt
+```
+
+建议：
+
+LLM 与 AntiFraud 使用两个 conda 环境：
+
+```bash
+conda create -n llm python=3.10 -y
+conda create -n antifraud python=3.10 -y
+```
+
+避免 vLLM、xformers、PyTorch Geometric 依赖冲突。
+
 训练
 
  # 默认训练（MPFC with LLM）

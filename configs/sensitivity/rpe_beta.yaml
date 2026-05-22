@@ -1,0 +1,14 @@
+# 参数敏感性实验：rpe_beta (奖励预测误差系数)
+# 多巴胺样调制强度。beta=0 退化为标准 focal loss。
+experiment:
+  name: "sweep_rpe_beta"
+  seed: 42
+
+sweep:
+  enabled: true
+  method: "grid"
+  params:
+    rpe_beta: [0.0, 0.5, 1.0, 1.5, 3.0]
+
+train:
+  epochs: 5

@@ -141,6 +141,26 @@ class VisualizationConfig:
 
 
 @dataclass
+class VTAVariantConfig:
+    name: str = ""
+    focal_gamma: float = 2.0
+    rpe_beta: float = 1.5
+    pos_weight: float = 5.0
+
+
+@dataclass
+class VTADecompConfig:
+    enabled: bool = False
+    variants: List[Dict] = field(default_factory=lambda: [
+        {"name": "full", "focal_gamma": 2.0, "rpe_beta": 1.5, "pos_weight": 5.0},
+        {"name": "wo_focal", "focal_gamma": 0.0, "rpe_beta": 1.5, "pos_weight": 5.0},
+        {"name": "wo_rpe", "focal_gamma": 2.0, "rpe_beta": 0.0, "pos_weight": 5.0},
+        {"name": "wo_pw", "focal_gamma": 2.0, "rpe_beta": 1.5, "pos_weight": 1.0},
+        {"name": "bce_only", "focal_gamma": 0.0, "rpe_beta": 0.0, "pos_weight": 1.0},
+    ])
+
+
+@dataclass
 class Config:
     experiment: ExperimentConfig = field(default_factory=ExperimentConfig)
     data: DataConfig = field(default_factory=DataConfig)
@@ -150,6 +170,7 @@ class Config:
     sweep: SweepConfig = field(default_factory=SweepConfig)
     multi_seed: MultiSeedConfig = field(default_factory=MultiSeedConfig)
     visualization: VisualizationConfig = field(default_factory=VisualizationConfig)
+    vta_decomp: VTADecompConfig = field(default_factory=VTADecompConfig)
 
     def __post_init__(self):
         # 将嵌套 dict 转为 dataclass
@@ -173,6 +194,8 @@ class Config:
             self.multi_seed = MultiSeedConfig(**self.multi_seed)
         if isinstance(self.visualization, dict):
             self.visualization = VisualizationConfig(**self.visualization)
+        if isinstance(self.vta_decomp, dict):
+            self.vta_decomp = VTADecompConfig(**self.vta_decomp)
 
     def to_dict(self) -> Dict:
         return asdict(self)
