@@ -36,7 +36,7 @@
 import argparse
 import os
 import sys
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
 from experiments.runner import ExperimentRunner
 from utils import Logger, load_config, merge_config
@@ -49,10 +49,10 @@ def parse_args() -> argparse.Namespace:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
 
-    # 配置
+    # 配置（支持多个 --config，后面的覆盖前面的）
     parser.add_argument(
-        "--config", type=str, default="configs/default.yaml",
-        help="配置文件路径 (默认: configs/default.yaml)",
+        "--config", type=str, action="append", default=None,
+        help='配置文件路径（可指定多个，后面的覆盖前面的；默认: configs/default.yaml）',
     )
 
     # 实验模式
@@ -211,29 +211,37 @@ def build_overrides(args: argparse.Namespace) -> Dict:
 
 
 def setup_experiment(
-    config_path: str, cli_overrides: Optional[Dict] = None
+    config_paths: List[str], cli_overrides: Optional[Dict] = None
 ) -> Config:
     """
     加载配置并设置实验环境。
 
     Args:
-        config_path: YAML 配置文件路径
+        config_paths: YAML 配置文件路径列表（后面的覆盖前面的）
         cli_overrides: 命令行参数覆盖字典
 
     Returns:
         cfg: 合并后的配置对象
     """
-    # 解析配置文件路径
-    if not os.path.isabs(config_path):
-        # 尝试相对路径
-        base_dir = os.path.dirname(os.path.abspath(__file__))
-        config_path = os.path.join(base_dir, config_path)
+    if not config_paths:
+        config_paths = ["configs/default.yaml"]
 
-    if not os.path.exists(config_path):
-        raise FileNotFoundError(f"Configuration file not found: {config_path}")
+    base_dir = os.path.dirname(os.path.abspath(__file__))
 
-    # 加载基础配置
-    cfg = load_config(config_path)
+    # 解析并加载所有配置文件，依次合并（后面的覆盖前面的）
+    cfg = None
+    for cp in config_paths:
+        if not os.path.isabs(cp):
+            cp = os.path.join(base_dir, cp)
+        if not os.path.exists(cp):
+            raise FileNotFoundError(f"Configuration file not found: {cp}")
+        if cfg is None:
+            cfg = load_config(cp)
+        else:
+            cfg = merge_config(cfg, load_config(cp))
+
+    if cfg is None:
+        raise FileNotFoundError("No configuration file loaded.")
 
     # 合并 CLI 覆盖
     if cli_overrides:
@@ -243,12 +251,25 @@ def setup_experiment(
     output_dir = os.path.join(cfg.experiment.output_dir, cfg.experiment.name)
     os.makedirs(output_dir, exist_ok=True)
 
-    # 将数据路径转为绝对路径（相对于配置文件所在目录）
-    config_dir = os.path.dirname(os.path.abspath(config_path))
-    if not os.path.isabs(cfg.data.data_path):
+    # 将数据路径转为绝对路径（相对于主配置文件所在目录）
+    main_config = config_paths[0]
+    if not os.path.isabs(main_config):
+        main_config = os.path.join(base_dir, main_config)
+    config_dir = os.path.dirname(os.path.abspath(main_config))
+    if cfg.data.data_path and not os.path.isabs(cfg.data.data_path):
         cfg.data.data_path = os.path.join(config_dir, cfg.data.data_path)
-    if not os.path.isabs(cfg.data.preprocessed_path):
+    if cfg.data.preprocessed_path and not os.path.isabs(cfg.data.preprocessed_path):
         cfg.data.preprocessed_path = os.path.join(config_dir, cfg.data.preprocessed_path)
+
+    # 保存最终配置到实验输出目录（供 test/resume 模式复用）
+    import yaml
+    saved_config_path = os.path.join(output_dir, "config.yaml")
+    if not os.path.exists(saved_config_path):
+        try:
+            with open(saved_config_path, "w") as f:
+                yaml.dump(cfg.to_dict(), f, default_flow_style=False, allow_unicode=True)
+        except Exception as e:
+            print(f"[WARN] Failed to save config: {e}")
 
     return cfg
 
@@ -256,7 +277,8 @@ def setup_experiment(
 def main():
     args = parse_args()
     overrides = build_overrides(args)
-    cfg = setup_experiment(args.config, overrides)
+    config_paths = args.config if args.config else ["configs/default.yaml"]
+    cfg = setup_experiment(config_paths, overrides)
 
     # 记录配置（仅控制台，文件日志由 base_trainer 负责）
     logger = Logger(
@@ -264,7 +286,7 @@ def main():
         log_dir=os.path.join(cfg.experiment.output_dir, cfg.experiment.name),
         log_file=False,
     )
-    logger.info(f"Config: {args.config}")
+    logger.info(f"Config: {' + '.join(config_paths)}")
     logger.info(f"Experiment: {cfg.experiment.name}")
     logger.info(f"Model: {cfg.model.name}")
 
@@ -272,7 +294,40 @@ def main():
         # 推理测试模式
         from trainers.base_trainer import BaseTrainer
 
+        # 如果数据路径不合法（用最小配置如 wo_ca1.yaml 加载时可能丢失路径），
+        # 尝试从 checkpoint 目录反推：.../exp_name/run_xxx/ckpt/ → exp_name → 找 default.yaml
+        if not cfg.data.data_path or not os.path.exists(cfg.data.data_path):
+            ckpt_dir_parts = os.path.normpath(args.checkpoint).split(os.sep)
+            # 从 checkpoint 路径中找到 exp_name（run_xxx 的上一级）
+            try:
+                run_idx = next(i for i, p in enumerate(ckpt_dir_parts) if p.startswith("run_"))
+                exp_name = ckpt_dir_parts[run_idx - 1]
+                # 尝试加载同实验名下保存的完整配置
+                exp_config = os.path.join(cfg.experiment.output_dir, exp_name, "config.yaml")
+                if os.path.exists(exp_config):
+                    cfg = load_config(exp_config)
+                    logger.info(f"Reused saved config from {exp_config}")
+                else:
+                    # 退化回 default.yaml
+                    fallback = "configs/default.yaml"
+                    if not os.path.isabs(fallback):
+                        fallback = os.path.join(os.path.dirname(os.path.abspath(__file__)), fallback)
+                    if os.path.exists(fallback):
+                        cfg = load_config(fallback)
+                        cfg.experiment.name = exp_name
+                        logger.info(f"Fallback to {fallback} (data path not found)")
+                        # 重新 resolve 数据路径
+                        config_dir = os.path.dirname(os.path.abspath(fallback))
+                        if cfg.data.data_path and not os.path.isabs(cfg.data.data_path):
+                            cfg.data.data_path = os.path.join(config_dir, cfg.data.data_path)
+                        if cfg.data.preprocessed_path and not os.path.isabs(cfg.data.preprocessed_path):
+                            cfg.data.preprocessed_path = os.path.join(config_dir, cfg.data.preprocessed_path)
+            except (StopIteration, IndexError):
+                logger.warning("Could not infer experiment from checkpoint path, using current config.")
+
         logger.info(f"Test mode with checkpoint: {args.checkpoint}")
+        logger.info(f"Data path: {cfg.data.data_path}")
+        logger.info(f"Preprocessed path: {cfg.data.preprocessed_path}")
         trainer = BaseTrainer(cfg)
         trainer.test(checkpoint_path=args.checkpoint)
     elif args.resume:
@@ -284,7 +339,7 @@ def main():
         trainer.train()
     else:
         # 正常实验模式
-        runner = ExperimentRunner(cfg, config_path=args.config)
+        runner = ExperimentRunner(cfg, config_path=config_paths[0])
         runner.run()
 
 

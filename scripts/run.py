@@ -193,7 +193,7 @@ def main():
         cli_overrides["sweep"] = {"enabled": True}
 
     # 创建并运行实验
-    cfg = setup_experiment(args.config, cli_overrides)
+    cfg = setup_experiment([args.config], cli_overrides)
 
     if args.test and args.checkpoint:
         from trainers.base_trainer import BaseTrainer

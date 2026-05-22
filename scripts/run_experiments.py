@@ -84,11 +84,8 @@ class ExperimentManager:
         self.results: Dict[str, List[Dict]] = defaultdict(list)
 
     def _base_args(self) -> List[str]:
-        """构建所有实验共用的基础命令行参数。"""
-        args_list = [
-            str(TRAIN_SCRIPT),
-            "--config", str(DEFAULT_CONFIG),
-        ]
+        """构建所有实验共用的基础命令行参数（不含 --config）。"""
+        args_list = [str(TRAIN_SCRIPT)]
         if self.llm_api_url:
             args_list.extend(["--llm_api_url", self.llm_api_url])
         if self.output_dir:
@@ -139,6 +136,7 @@ class ExperimentManager:
         if self.args.use_runner_ablation:
             # 方法一：使用 runner.py 内置消融（一次执行所有变体）
             args = self._base_args() + [
+                "--config", str(DEFAULT_CONFIG),
                 "--ablation",
                 "--name", "ablation_all",
             ]
@@ -150,7 +148,9 @@ class ExperimentManager:
                 if not config_file.exists():
                     print(f"  [SKIP] Config not found: {config_file}")
                     continue
+                # 以 default.yaml 为基础，追加消融配置文件作为 override
                 args = self._base_args() + [
+                    "--config", str(DEFAULT_CONFIG),
                     "--config", str(config_file),
                     "--name", f"ablation_{variant}",
                 ]
