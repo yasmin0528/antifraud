@@ -238,7 +238,10 @@ def setup_experiment(
         if cfg is None:
             cfg = load_config(cp)
         else:
-            cfg = merge_config(cfg, load_config(cp))
+            # load_config 返回 Config 对象，转 dict 后再 merge
+            from dataclasses import asdict
+            override_cfg = load_config(cp)
+            cfg = merge_config(cfg, asdict(override_cfg))
 
     if cfg is None:
         raise FileNotFoundError("No configuration file loaded.")
