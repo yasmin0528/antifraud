@@ -107,7 +107,23 @@ class ExperimentRunner:
 
     def _run_ablation(self):
         """运行消融实验。"""
-        variants = self.cfg.ablation.variants or ["wo_ca1", "wo_ca3", "wo_mpfc", "wo_vta", "wo_llm"]
+        cfg = self.cfg
+        remove_modules = cfg.ablation.remove_modules
+
+        if remove_modules:
+            # 用户已指定具体模块（通过配置文件或命令行），直接跑单次消融
+            modules_str = "_".join(remove_modules)
+            suffix = f"wo_{modules_str}"
+            self.logger.info("-" * 40)
+            self.logger.info(f"Ablation: remove_modules={remove_modules}")
+            self.logger.info("-" * 40)
+            result = self._run_single(cfg)
+            result["variant"] = suffix
+            self.results.append(result)
+            return
+
+        # 未指定 remove_modules，遍历所有预定义变体
+        variants = cfg.ablation.variants or ["wo_ca1", "wo_ca3", "wo_mpfc", "wo_vta", "wo_llm"]
 
         variant_map = {
             "wo_ca1": {"ablation": {"remove_modules": ["ca1"]}},
@@ -126,11 +142,11 @@ class ExperimentRunner:
             self.logger.info(f"Ablation: {variant}")
             self.logger.info("-" * 40)
 
-            cfg = copy.deepcopy(self.cfg)
-            cfg = merge_config(cfg, variant_map[variant])
-            cfg.experiment.name = f"{self.cfg.experiment.name}_{variant}"
+            sub_cfg = copy.deepcopy(cfg)
+            sub_cfg = merge_config(sub_cfg, variant_map[variant])
+            sub_cfg.experiment.name = f"{cfg.experiment.name}_{variant}"
 
-            result = self._run_single(cfg)
+            result = self._run_single(sub_cfg)
             result["variant"] = variant
             self.results.append(result)
 

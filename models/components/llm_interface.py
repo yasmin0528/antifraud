@@ -54,7 +54,7 @@ class LLMInterface:
 
     def __init__(
         self,
-        model_name: str = "meta-llama/Llama-3.2-8B-Instruct",
+        model_name: str = "qwen",
         use_api: bool = True,
         api_url: Optional[str] = None,
         api_key: Optional[str] = None,

@@ -113,7 +113,7 @@ class MPFC(nn.Module):
 
         # ---- LLM 配置（mPFC 内置组件） ----
         llm_config = llm_config or {}
-        self.llm_model_name = llm_config.get("model_name", "meta-llama/Llama-3.2-8B-Instruct")
+        self.llm_model_name = llm_config.get("model_name", "qwen")
         self.llm_use_api = llm_config.get("use_api", True)
         self.llm_api_url = llm_config.get("api_url", None)
         self.llm_api_key = llm_config.get("api_key", None)
