@@ -23,7 +23,7 @@ from typing import Any, Dict, List, Optional
 import numpy as np
 import torch
 
-from trainers.base_trainer import BaseTrainer
+from core.base_trainer import BaseTrainer
 from utils import Config, Logger, load_config, merge_config, set_seed
 
 

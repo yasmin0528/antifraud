@@ -38,7 +38,7 @@ import os
 import sys
 from typing import Dict, List, Optional
 
-from experiments.runner import ExperimentRunner
+from core.runner import ExperimentRunner
 from utils import Logger, load_config, merge_config
 from utils.config import Config
 
@@ -295,7 +295,7 @@ def main():
 
     if args.test and args.checkpoint:
         # 推理测试模式
-        from trainers.base_trainer import BaseTrainer
+        from core.base_trainer import BaseTrainer
 
         # 如果数据路径不合法（用最小配置如 wo_ca1.yaml 加载时可能丢失路径），
         # 尝试从 checkpoint 目录反推：.../exp_name/run_xxx/ckpt/ → exp_name → 找 default.yaml
@@ -335,7 +335,7 @@ def main():
         trainer.test(checkpoint_path=args.checkpoint)
     elif args.resume:
         # 断点续训模式
-        from trainers.base_trainer import BaseTrainer
+        from core.base_trainer import BaseTrainer
 
         logger.info(f"Resume mode: {cfg.experiment.name}")
         trainer = BaseTrainer(cfg, resume=True)

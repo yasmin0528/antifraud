@@ -53,22 +53,7 @@ ABLATION_DIR = CONFIG_DIR / "ablation"
 SENSITIVITY_DIR = CONFIG_DIR / "sensitivity"
 DEFAULT_OUTPUT_DIR = BASE_DIR / "outputs"
 
-ABLATION_VARIANTS = [
-    "wo_ca1",
-    "wo_ca3",
-    "wo_mpfc",
-    "wo_vta",
-    "wo_llm",
-]
-
-SENSITIVITY_VARIANTS = [
-    "learning_rate",
-    "focal_gamma",
-    "rpe_beta",
-    "memory_momentum",
-]
-
-MULTI_SEEDS = [42, 123, 456, 789, 1111]
+# 实验配置 —— 由磁盘文件列表驱动，无需手动维护列表
 
 
 class ExperimentManager:
@@ -126,50 +111,45 @@ class ExperimentManager:
         self.run_cmd("Baseline: 完整 MPFC 模型", args)
         print("  [基础实验完成]")
 
-    # -------- 消融实验 --------
+    # -------- 消融实验（从 configs/ablation/ 目录自动扫描） --------
     def run_ablation(self):
         print()
         print("█" * 70)
         print("  消融实验 (Ablation) - 逐一移除模块")
         print("█" * 70)
 
-        if self.args.use_runner_ablation:
-            # 方法一：使用 runner.py 内置消融（一次执行所有变体）
+        # 扫描 configs/ablation/ 目录下的所有 YAML 文件
+        variant_files = sorted(ABLATION_DIR.glob("*.yaml"))
+        if not variant_files:
+            print(f"  [SKIP] No ablation configs found in {ABLATION_DIR}")
+            return
+
+        for config_file in variant_files:
+            variant = config_file.stem  # wo_ca1, wo_ca3, ...
+            # 以 default.yaml 为基础，追加消融配置文件作为 override
             args = self._base_args() + [
                 "--config", str(DEFAULT_CONFIG),
-                "--ablation",
-                "--name", "ablation_all",
+                "--config", str(config_file),
+                "--name", f"ablation_{variant}",
             ]
-            self.run_cmd("消融实验: runner.py 内置批量消融", args)
-        else:
-            # 方法二：逐一运行每个消融配置文件
-            for variant in ABLATION_VARIANTS:
-                config_file = ABLATION_DIR / f"{variant}.yaml"
-                if not config_file.exists():
-                    print(f"  [SKIP] Config not found: {config_file}")
-                    continue
-                # 以 default.yaml 为基础，追加消融配置文件作为 override
-                args = self._base_args() + [
-                    "--config", str(DEFAULT_CONFIG),
-                    "--config", str(config_file),
-                    "--name", f"ablation_{variant}",
-                ]
-                self.run_cmd(f"消融实验: {variant}", args)
+            self.run_cmd(f"消融实验: {variant}", args)
 
         print("  [消融实验完成]")
 
-    # -------- 参数敏感性实验 --------
+    # -------- 参数敏感性实验（从 configs/sensitivity/ 目录自动扫描） --------
     def run_sensitivity(self):
         print()
         print("█" * 70)
         print("  参数敏感性实验 (Sensitivity) - 网格搜索")
         print("█" * 70)
 
-        for variant in SENSITIVITY_VARIANTS:
-            config_file = SENSITIVITY_DIR / f"{variant}.yaml"
-            if not config_file.exists():
-                print(f"  [SKIP] Config not found: {config_file}")
-                continue
+        variant_files = sorted(SENSITIVITY_DIR.glob("**/*.yaml"))
+        if not variant_files:
+            print(f"  [SKIP] No sensitivity configs found in {SENSITIVITY_DIR}")
+            return
+
+        for config_file in variant_files:
+            variant = "_".join(config_file.relative_to(SENSITIVITY_DIR).parts).removesuffix(".yaml")
             args = self._base_args() + [
                 "--config", str(config_file),
                 "--name", f"sensitivity_{variant}",
@@ -198,28 +178,29 @@ class ExperimentManager:
 
         print("  [VTA 损失解耦实验完成]")
 
-    # -------- 多随机种子实验 --------
+    # -------- 多随机种子实验（从 configs/default.yaml 读取种子列表） --------
     def run_multi_seed(self):
         print()
         print("█" * 70)
         print("  多随机种子实验 (Multi-Seed) - 评估稳定性")
         print("█" * 70)
 
-        if self.args.use_runner_multi_seed:
-            # 方法一：使用 runner.py 内置多种子模式
+        # 从 default.yaml 读取 multi_seed.seeds
+        import yaml
+        try:
+            with open(DEFAULT_CONFIG, "r") as f:
+                default_cfg = yaml.safe_load(f)
+            seeds = default_cfg.get("multi_seed", {}).get("seeds", [42, 123, 456, 789, 1111])
+        except Exception as e:
+            print(f"  [WARNING] Failed to read seeds from config: {e}, using defaults")
+            seeds = [42, 123, 456, 789, 1111]
+
+        for seed in seeds:
             args = self._base_args() + [
-                "--multi_seed",
-                "--name", "multi_seed_5runs",
+                "--seed", str(seed),
+                "--name", f"multi_seed_seed{seed}",
             ]
-            self.run_cmd("多种子实验: runner.py 内置 5 个种子", args)
-        else:
-            # 方法二：逐一运行每个种子
-            for seed in MULTI_SEEDS:
-                args = self._base_args() + [
-                    "--seed", str(seed),
-                    "--name", f"multi_seed_seed{seed}",
-                ]
-                self.run_cmd(f"多种子实验: seed={seed}", args)
+            self.run_cmd(f"多种子实验: seed={seed}", args)
 
         print("  [多随机种子实验完成]")
 
@@ -407,12 +388,6 @@ def parse_args() -> argparse.Namespace:
                         help="Export summary to CSV file path")
     parser.add_argument("--dry-run", action="store_true",
                         help="Print commands without executing")
-
-    # 实验方式选择
-    parser.add_argument("--use-runner-ablation", action="store_true",
-                        help="Use runner.py's built-in ablation (single command)")
-    parser.add_argument("--use-runner-multi-seed", action="store_true",
-                        help="Use runner.py's built-in multi-seed (single command)")
 
     return parser.parse_args()
 

@@ -15,14 +15,14 @@ from __future__ import annotations
 import os
 import time
 from datetime import datetime
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
 
-from datasets.aml_dataset import (
+from core.aml_dataset import (
     build_batch_graph,
     build_transaction_summary,
     get_dataloaders,
@@ -134,6 +134,7 @@ class BaseTrainer:
         self.best_threshold = 0.5
         self.patience_counter = 0
         self.global_step = 0
+        self.epoch_losses: List[float] = []  # 每个 epoch 的平均 loss，用于可视化
 
     @staticmethod
     def _find_latest_run_dir(exp_root: str) -> Optional[str]:
@@ -403,6 +404,9 @@ class BaseTrainer:
 
         avg_loss = epoch_loss / len(self.train_loader)
         train_metrics = tracker.compute()
+
+        # 记录 epoch loss 用于可视化（不再从日志文件解析）
+        self.epoch_losses.append(avg_loss)
 
         return avg_loss, train_metrics
 
@@ -731,17 +735,15 @@ class BaseTrainer:
 
         self.logger.info("Generating visualizations...")
 
-        # Loss curve
+        # Loss curve（使用内存中记录的 epoch loss）
         if cfg.plot_loss:
-            log_path = os.path.join(self.log_dir, f"{self.cfg.experiment.name}.log")
-            train_losses = self._extract_losses_from_log(log_path)
-            if train_losses:
+            if self.epoch_losses:
                 self.visualizer.plot_loss_curve(
-                    train_losses,
+                    self.epoch_losses,
                     name="loss_curve",
                 )
             else:
-                self.logger.warning("No loss values found for plotting.")
+                self.logger.warning("No loss values recorded for plotting.")
 
         # ROC & PR curves
         if cfg.plot_roc and self.val_loader is not None:
@@ -843,22 +845,3 @@ class BaseTrainer:
             f"AP={test_metrics.get('ap', float('nan')):.4f}"
         )
         return test_metrics
-
-    @staticmethod
-    def _extract_losses_from_log(log_path: str) -> List[float]:
-        """从日志文件中提取 loss 值（仅用于可视化）。"""
-        losses = []
-        try:
-            with open(log_path, "r") as f:
-                for line in f:
-                    if "loss=" in line:
-                        parts = line.split("loss=")
-                        if len(parts) > 1:
-                            try:
-                                loss_val = float(parts[1].split()[0])
-                                losses.append(loss_val)
-                            except (ValueError, IndexError):
-                                pass
-        except (FileNotFoundError, IOError):
-            pass
-        return losses

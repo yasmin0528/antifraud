@@ -61,8 +61,8 @@ class Logger:
             ))
             self._logger.addHandler(ch)
 
-        # TensorBoard writer
-        self.tb_writer = SummaryWriter(log_dir=log_dir)
+        # TensorBoard writer（只在 log_file=True 时创建，避免控制台 Logger 在错误目录生成 events 文件）
+        self.tb_writer = SummaryWriter(log_dir=log_dir) if log_file else None
 
     def info(self, msg: str):
         self._logger.info(msg)
@@ -78,7 +78,8 @@ class Logger:
 
     def scalar(self, tag: str, value: float, step: int):
         """记录标量到 TensorBoard。"""
-        self.tb_writer.add_scalar(tag, value, step)
+        if self.tb_writer is not None:
+            self.tb_writer.add_scalar(tag, value, step)
 
     def log_scalar(self, tag: str, value: float, step: int):
         """log_scalar 别名，兼容旧接口。"""
@@ -86,14 +87,18 @@ class Logger:
 
     def scalars(self, tag: str, value_dict: dict, step: int):
         """记录多个标量。"""
-        self.tb_writer.add_scalars(tag, value_dict, step)
+        if self.tb_writer is not None:
+            self.tb_writer.add_scalars(tag, value_dict, step)
 
     def figure(self, tag: str, figure, step: int):
         """记录 matplotlib 图表。"""
-        self.tb_writer.add_figure(tag, figure, step)
+        if self.tb_writer is not None:
+            self.tb_writer.add_figure(tag, figure, step)
 
     def log_figure(self, tag: str, figure_or_path, step: int = 0):
         """log_figure 别名，兼容旧接口。支持传入文件路径或 figure 对象。"""
+        if self.tb_writer is None:
+            return
         if isinstance(figure_or_path, str):
             import matplotlib.image as mpimg
             fig = mpimg.imread(figure_or_path)
@@ -103,10 +108,12 @@ class Logger:
 
     def histogram(self, tag: str, values, step: int):
         """记录直方图。"""
-        self.tb_writer.add_histogram(tag, values, step)
+        if self.tb_writer is not None:
+            self.tb_writer.add_histogram(tag, values, step)
 
     def close(self):
-        self.tb_writer.close()
+        if self.tb_writer is not None:
+            self.tb_writer.close()
         for handler in self._logger.handlers[:]:
             handler.close()
             self._logger.removeHandler(handler)
