@@ -79,17 +79,17 @@ class CheckpointManager:
         """加载最新 checkpoint。"""
         path = os.path.join(self.ckpt_dir, "latest.pt")
         if os.path.exists(path):
-            return torch.load(path, map_location=device)
+            return torch.load(path, map_location=device, weights_only=False)
         return None
 
     def load_best(self, device: str = "cpu") -> Optional[Dict[str, Any]]:
         """加载最佳 checkpoint。"""
         if self.best_path and os.path.exists(self.best_path):
-            return torch.load(self.best_path, map_location=device)
+            return torch.load(self.best_path, map_location=device, weights_only=False)
         # 尝试找 best.pt
         path = os.path.join(self.ckpt_dir, "best.pt")
         if os.path.exists(path):
-            return torch.load(path, map_location=device)
+            return torch.load(path, map_location=device, weights_only=False)
         return None
 
     def _cleanup(self):

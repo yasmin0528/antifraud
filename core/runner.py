@@ -99,7 +99,12 @@ class ExperimentRunner:
         """运行单个实验并返回结果。"""
         set_seed(cfg.experiment.seed)
         trainer = BaseTrainer(cfg)
-        result = trainer.train()
+        try:
+            result = trainer.train()
+        except Exception as e:
+            trainer.logger.error(f"Training failed: {e}")
+            trainer.logger.exception("Full traceback:")
+            raise
         result["config_name"] = cfg.experiment.name
         result["seed"] = cfg.experiment.seed
         result["model"] = cfg.model.name

@@ -19,6 +19,15 @@ conda activate antifraud
 pip install -r requirements_antifraud.txt
 ```
 
+项目根目录下操作：
+
+```bash
+cd /path/to/antifraud
+
+# 确保 train.py 有执行权限
+chmod +x train.py
+```
+
 ## 目录结构
 
 ```
@@ -27,15 +36,13 @@ pip install -r requirements_antifraud.txt
 ├── scripts/
 │   ├── run_experiments.py            # 实验编排器（批量运行各类实验）
 │   └── view_llm_rules.py             # 查看 LLM 生成的规则
+├── core/                             # 核心模块（数据集、训练器、编排器）
 ├── configs/
 │   ├── default.yaml                  # 默认配置（完整模型）
 │   ├── ablation/                     # 消融实验配置（wo_*）
 │   ├── sensitivity/                  # 参数敏感性配置
 │   └── vta_decomposition.yaml        # VTA 损失解耦配置
 ├── models/                           # 模型组件
-├── trainers/                         # 训练循环
-├── experiments/                      # 实验编排
-├── datasets/                         # 数据加载
 └── utils/                            # 工具（日志/checkpoint/可视化）
 ```
 
@@ -44,12 +51,24 @@ pip install -r requirements_antifraud.txt
 | 实验类型 | 说明 | 子实验数 | 预计总时长 |
 |----------|------|----------|-----------|
 | baseline | 完整 MPFC 模型 | 1 | ~30min |
-| ablation | 逐模块消融（CA1/CA3/MPFC/VTA/LLM） | 5 | ~2.5h |
-| sensitivity | 参数敏感性（lr/focal_gamma/rpe_beta/memory_momentum/...） | 4 | ~4.5h |
+| ablation | 逐模块消融（CA1/CA3/MPFC/VTA/LLM） | 5 | 1h+1.5h+4.5h |
+| sensitivity | 参数敏感性（lr/focal_gamma/rpe_beta/memory_momentum） | 4 | ~2h |
 | vta_decomp | VTA 损失解耦（Focal/RPE/PW 逐组件清零） | 5 | ~2.5h |
 | multi_seed | 多随机种子稳定性评估（5 seeds） | 5 | ~2.5h |
 
 > 以上时长按 `--epochs 10`、单 GPU 估计。
+
+## 通用参数
+
+所有实验共用以下参数：
+
+| 参数 | 说明 | 必需 |
+|------|------|------|
+| `--llm_api_url <URL>` | LLM API 端点 | 需要 LLM 的实验必填 |
+| `--data_path <PATH>` | 数据集 CSV 路径 | 需要数据的实验必填 |
+| `--preprocessed_path <PATH>` | 预处理数据路径（可选） | 否 |
+| `--epochs <N>` | 训练轮数（默认 10） | 否 |
+| `--output_dir <DIR>` | 输出目录（默认 outputs/） | 否 |
 
 ---
 
@@ -58,11 +77,12 @@ pip install -r requirements_antifraud.txt
 运行完整 MPFC 模型（含 LLM 规则生成）：
 
 ```bash
+# 方式一：直接通过 train.py 运行
 python train.py \
     --config configs/default.yaml \
     --llm_api_url http://127.0.0.1:23333/v1/chat/completions \
     --name baseline \
-    --epochs 50
+    --epochs 10
 ```
 
 输出目录：`outputs/baseline/run_YYYYMMDD_HHMMSS/`
@@ -70,12 +90,10 @@ python train.py \
 ### 断点续训
 
 ```bash
+# 自动恢复 outputs/baseline/ 下最新的 run_* 目录
 python train.py --resume
-```
 
-自动恢复 `outputs/baseline/` 下最新的 `run_*` 目录。如需指定 checkpoint：
-
-```bash
+# 指定 checkpoint 恢复
 python train.py --resume outputs/baseline/run_20260523_120000/checkpoint/latest.pt
 ```
 
@@ -105,10 +123,9 @@ python train.py \
 ### 批量运行（推荐）
 
 ```bash
-python scripts/run_experiments.py \
-    --only ablation \
-    --llm_api_url http://127.0.0.1:23333/v1/chat/completions \
-    --data_path /path/to/dataset.csv
+ python scripts/run_experiments.py \
+     --only ablation \
+     --llm_api_url http://127.0.0.1:23333/v1/chat/completions
 ```
 
 自动扫描 `configs/ablation/*.yaml`，逐一执行所有变体。
@@ -145,17 +162,16 @@ outputs/ablation_wo_ca1/run_20260523_120001/
 python scripts/run_experiments.py \
     --only sensitivity \
     --llm_api_url http://127.0.0.1:23333/v1/chat/completions \
-    --data_path /path/to/dataset.csv
 ```
 
 ### 当前扫描的参数
 
 | 参数 | 文件 | 扫描范围 |
 |------|------|----------|
-| learning_rate | `sensitivity/learning_rate.yaml` | [1e-5, 1e-4, 1e-3, 1e-2, 1e-1] |
-| focal_gamma | `sensitivity/focal_gamma.yaml` | [0.0, 0.5, 1.0, 2.0, 4.0] |
-| rpe_beta | `sensitivity/rpe_beta.yaml` | [0.0, 0.5, 1.0, 1.5, 3.0] |
-| memory_momentum | `sensitivity/memory_momentum.yaml` | [0.0, 0.5, 0.7, 0.9, 0.99] |
+| learning_rate | `configs/sensitivity/learning_rate.yaml` | [1e-5, 1e-4, 1e-3, 1e-2, 1e-1] |
+| focal_gamma | `configs/sensitivity/focal_gamma.yaml` | [0.0, 0.5, 1.0, 2.0, 4.0] |
+| rpe_beta | `configs/sensitivity/rpe_beta.yaml` | [0.0, 0.5, 1.0, 1.5, 3.0] |
+| memory_momentum | `configs/sensitivity/memory_momentum.yaml` | [0.0, 0.5, 0.7, 0.9, 0.99] |
 
 ### 单独运行某个扫描
 
@@ -217,11 +233,13 @@ python scripts/run_experiments.py \
 
 依次执行：baseline → ablation → sensitivity → vta_decomp → multi_seed，完成后自动汇总结果。
 
+> `scripts/run_experiments.py` 不接受 `--config` 参数。配置文件路径由脚本内部自动拼接。
+
 ### 常用选项
 
 | 参数 | 说明 |
 |------|------|
-| `--only <type>` | 仅运行指定类型实验 |
+| `--only <type>` | 仅运行指定类型实验（baseline/ablation/sensitivity/vta_decomp/multi_seed） |
 | `--dry-run` | 只打印命令，不实际执行 |
 | `--summarize-only` | 仅汇总已有结果，不重新运行 |
 | `--no-summarize` | 跳过最终汇总 |

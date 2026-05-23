@@ -93,9 +93,15 @@ class ExperimentManager:
             print("  (DRY RUN - skipped)")
             return
 
-        result = subprocess.run(cmd_args, cwd=str(BASE_DIR))
+        # 捕获 stderr 以记录详细报错
+        result = subprocess.run(
+            cmd_args, cwd=str(BASE_DIR),
+            stderr=subprocess.PIPE, text=True,
+        )
         if result.returncode != 0:
             print(f"  [WARNING] Command exited with code {result.returncode}, continuing...")
+            if result.stderr:
+                print(f"  [STDERR] {result.stderr[:2000]}")  # 打印前 2000 字符
 
     # -------- 基础实验 --------
     def run_baseline(self):
