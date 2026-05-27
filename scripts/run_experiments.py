@@ -283,11 +283,11 @@ class ExperimentManager:
         if not output_dir.exists():
             return results
 
-        # 查找所有实验目录下的 results.csv
+        # 查找所有实验目录下的 results_summary.csv（由 core/runner.py 生成）
         for exp_dir in sorted(output_dir.iterdir()):
             if not exp_dir.is_dir():
                 continue
-            csv_file = exp_dir / "results.csv"
+            csv_file = exp_dir / "results_summary.csv"
             if not csv_file.exists():
                 continue
 
