@@ -268,7 +268,6 @@ def setup_experiment(
         cfg.data.preprocessed_path = os.path.join(config_dir, cfg.data.preprocessed_path)
 
     # 保存最终配置到实验输出目录（供 test/resume 模式复用）
-    import yaml
     saved_config_path = os.path.join(output_dir, "config.yaml")
     if not os.path.exists(saved_config_path):
         try:
