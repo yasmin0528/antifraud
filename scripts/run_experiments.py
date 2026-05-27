@@ -149,7 +149,7 @@ class ExperimentManager:
         print("  参数敏感性实验 (Sensitivity) - 网格搜索")
         print("█" * 70)
 
-        variant_files = sorted(SENSITIVITY_DIR.glob("**/*.yaml"))
+        variant_files = sorted(SENSITIVITY_DIR.glob("*.yaml"))
         if not variant_files:
             print(f"  [SKIP] No sensitivity configs found in {SENSITIVITY_DIR}")
             return
