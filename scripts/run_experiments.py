@@ -157,6 +157,7 @@ class ExperimentManager:
         for config_file in variant_files:
             variant = "_".join(config_file.relative_to(SENSITIVITY_DIR).parts).removesuffix(".yaml")
             args = self._base_args() + [
+                "--config", str(DEFAULT_CONFIG),
                 "--config", str(config_file),
                 "--name", f"sensitivity_{variant}",
             ]
