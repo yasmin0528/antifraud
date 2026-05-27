@@ -38,6 +38,8 @@ import os
 import sys
 from typing import Dict, List, Optional
 
+import yaml
+
 from core.runner import ExperimentRunner
 from utils import Logger, load_config, merge_config
 from utils.config import Config
@@ -238,10 +240,11 @@ def setup_experiment(
         if cfg is None:
             cfg = load_config(cp)
         else:
-            # load_config 返回 Config 对象，转 dict 后再 merge
-            from dataclasses import asdict
-            override_cfg = load_config(cp)
-            cfg = merge_config(cfg, asdict(override_cfg))
+            # 直接加载 YAML 原始 dict（只包含文件中实际存在的字段）
+            # 避免 load_config 填充默认值后覆盖已有配置
+            with open(cp, "r", encoding="utf-8") as f:
+                override_dict = yaml.safe_load(f) or {}
+            cfg = merge_config(cfg, override_dict)
 
     if cfg is None:
         raise FileNotFoundError("No configuration file loaded.")
