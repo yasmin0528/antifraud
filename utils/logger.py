@@ -73,6 +73,10 @@ class Logger:
     def error(self, msg: str):
         self._logger.error(msg)
 
+    def exception(self, msg: str):
+        """记录异常堆栈跟踪（等效于 logging.exception）。"""
+        self._logger.exception(msg)
+
     def debug(self, msg: str):
         self._logger.debug(msg)
 

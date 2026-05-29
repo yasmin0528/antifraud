@@ -267,9 +267,9 @@ class BaseTrainer:
         else:
             self.logger.info(f"Loading preprocessed data from {data_path}...")
             data = torch.load(data_path)
-            required = ["sequences", "labels", "sender_idx", "receiver_idx", "alert_idx", "edge_attr"]
+            required = ["sequences", "labels", "sender_idx", "receiver_idx", "alert_idx", "edge_attr", "detection_features"]
             if not all(k in data for k in required):
-                self.logger.info("Preprocessed data outdated, reprocessing...")
+                self.logger.info("Preprocessed data outdated or incompatible, reprocessing...")
                 data = preprocess_data(
                     csv_path=cfg.data.data_path,
                     window_size=self.cfg.model.ca1.feature_dim,
