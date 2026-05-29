@@ -28,7 +28,8 @@ from core.aml_dataset import (
     get_dataloaders,
     preprocess_data,
 )
-from models import CA1_TTPM, CA3_AGM, MPFC, vta_weighted_loss
+from models import CA1_TTPM, CA3_AGM, MPFC
+from models.vta import compute_da_signal
 from utils import (
     CheckpointManager,
     ClassificationMetrics,
@@ -199,15 +200,15 @@ class BaseTrainer:
         else:
             self.logger.info("CA1 module removed by ablation.")
 
-        # CA3
+        # CA3（v2: 多记忆槽 + 软分配 + 门控融合 + 可学习记忆）
         if "ca3" not in remove_modules:
             ca3 = CA3_AGM(
                 emb_dim=cfg.model.ca3.emb_dim or cfg.model.hidden_dim,
-                num_groups=max(1, self.metadata.get("n_groups", 1)),
-                memory_momentum=cfg.model.ca3.memory_momentum,
+                num_groups=getattr(cfg.model.ca3, "num_groups", max(16, self.metadata.get("n_groups", 16))),
+                rpe_dim=1,
             ).to(self.device)
             self.models["ca3"] = ca3
-            self.logger.info(f"CA3 built (emb_dim={cfg.model.ca3.emb_dim}, n_groups={self.metadata.get('n_groups', 1)})")
+            self.logger.info(f"CA3 built (emb_dim={cfg.model.ca3.emb_dim}, num_groups={ca3.num_groups})")
         else:
             self.logger.info("CA3 module removed by ablation.")
 
@@ -260,10 +261,8 @@ class BaseTrainer:
             self.logger.info(f"Preprocessing data from {cfg.data.data_path}...")
             data = preprocess_data(
                 csv_path=cfg.data.data_path,
-                window_size=self.cfg.model.ca1.feature_dim,  # seq_len = feature_dim
+                window_size=self.cfg.model.ca1.feature_dim,
                 save_path=data_path,
-                use_smote=cfg.data.use_smote,
-                smote_ratio=cfg.data.smote_ratio,
             )
         else:
             self.logger.info(f"Loading preprocessed data from {data_path}...")
@@ -275,8 +274,6 @@ class BaseTrainer:
                     csv_path=cfg.data.data_path,
                     window_size=self.cfg.model.ca1.feature_dim,
                     save_path=data_path,
-                    use_smote=cfg.data.use_smote,
-                    smote_ratio=cfg.data.smote_ratio,
                 )
 
         self.train_loader, self.val_loader, self.test_loader, self.metadata = get_dataloaders(
@@ -298,7 +295,12 @@ class BaseTrainer:
 
     def _train_epoch(self) -> Tuple[float, Dict]:
         """
-        训练一个 epoch。
+        训练一个 epoch —— 多巴胺RPE调控循环。
+
+        RPE 信号流：
+        batch_n 预测 → 计算 RPE = |y - prob| → da_signal
+        ↓
+        batch_{n+1} 前向: da_signal 注入 CA3（记忆门控）和 MPFC（注意力锐利度）
 
         Returns:
             avg_loss: 平均损失
@@ -308,13 +310,15 @@ class BaseTrainer:
         has_ca1 = "ca1" in self.models
         has_ca3 = "ca3" in self.models
         has_mpfc = "mpfc" in self.models
-        remove_vta = "vta" in cfg.ablation.remove_modules
 
         for m in self.models.values():
             m.train()
 
         epoch_loss = 0.0
         tracker = MetricTracker()
+
+        # 多巴胺信号状态（跨 batch 传递）
+        prev_da_signal = None
 
         # 交易摘要（用于 MPFC 内置 LLM 规则生成）—— 只在第一轮构建
         transaction_summary = getattr(self, '_transaction_summary', None)
@@ -333,32 +337,34 @@ class BaseTrainer:
 
             self.optimizer.zero_grad()
 
-            # CA1
+            # ---- CA1: 时序建模 ----
             if has_ca1:
                 h, score_micro = self.models["ca1"](seq)
             else:
                 h = torch.zeros(seq.size(0), cfg.model.hidden_dim, device=self.device)
                 score_micro = torch.zeros(seq.size(0), 1, device=self.device)
 
-            # CA3
+            # ---- CA3: 记忆增强（受多巴胺RPE调控） ----
             if has_ca3:
-                h_enhanced = self.models["ca3"](h, group_ids=alert)
+                h_enhanced = self.models["ca3"](
+                    h, group_ids=alert, da_signal=prev_da_signal
+                )
             else:
                 h_enhanced = h
 
-            # Build graph
+            # ---- 构建图 ----
             node_x, edge_index, edge_attr_batch, sender_local = build_batch_graph(
                 sender, receiver, edge_e, h_enhanced, score_micro
             )
 
-            # MPFC（LLM 规则生成是 mPFC 模块的内置功能）
+            # ---- MPFC: 图推理（受多巴胺RPE调控） ----
             if has_mpfc:
                 _, logit, prob = self.models["mpfc"](
                     node_x, edge_index, edge_attr_batch,
                     transaction_summary=transaction_summary,
+                    da_signal=prev_da_signal,
                 )
             else:
-                # 无 MPFC：直接线性输出
                 logit = nn.Linear(node_x.size(-1), 1, device=self.device)(node_x)
                 prob = torch.sigmoid(logit)
 
@@ -366,20 +372,10 @@ class BaseTrainer:
             pred_logit = logit[sender_local]
             pred_prob = prob[sender_local].squeeze(-1)
 
-            # 损失
-            if remove_vta:
-                loss = nn.BCEWithLogitsLoss(pos_weight=torch.tensor(cfg.train.pos_weight, device=self.device))(
-                    pred_logit, label.float().view(-1, 1)
-                )
-            else:
-                loss = vta_weighted_loss(
-                    logit=pred_logit,
-                    y=label,
-                    prob=pred_prob.unsqueeze(-1),
-                    pos_weight=cfg.train.pos_weight,
-                    focal_gamma=cfg.train.focal_gamma,
-                    rpe_beta=cfg.train.rpe_beta,
-                )
+            # ---- 损失（标准 BCE，RPE 已作为前向控制信号） ----
+            loss = nn.BCEWithLogitsLoss(
+                pos_weight=torch.tensor(cfg.train.pos_weight, device=self.device)
+            )(pred_logit, label.float().view(-1, 1))
 
             loss.backward()
 
@@ -394,18 +390,39 @@ class BaseTrainer:
             epoch_loss += loss.item()
             tracker.update(pred_prob.detach().cpu(), label.cpu())
 
-            # 日志（仅在每个 epoch 结束打印最终 loss）
+            # ---- 多巴胺RPE信号更新（为下一 batch 准备） ----
+            with torch.no_grad():
+                da_current = compute_da_signal(
+                    prob=pred_prob.unsqueeze(-1),
+                    y=label,
+                    rpe_beta=cfg.train.rpe_beta,
+                    momentum=0.0,  # 不进行时序平滑，batch间差异本身就是RPE信号
+                    prev_da=None,
+                )
+                # 将 da_signal 映射到每个节点（通过 sender_local）
+                node_da = torch.zeros(node_x.size(0), 1, device=self.device)
+                node_da.index_add_(0, sender_local, da_current)
+                node_counts = torch.zeros(node_x.size(0), 1, device=self.device)
+                node_counts.index_add_(
+                    0, sender_local,
+                    torch.ones_like(da_current, device=self.device),
+                )
+                node_da = node_da / node_counts.clamp(min=1.0)
+                prev_da_signal = node_da
+
+            # 日志
             if cfg.train.log_interval > 0 and batch_idx % cfg.train.log_interval == 0:
                 self.logger.info(
                     f"Epoch {self.current_epoch}/{cfg.train.epochs} "
                     f"batch {batch_idx}/{len(self.train_loader)} "
-                    f"loss {loss.item():.4f}"
+                    f"loss {loss.item():.4f} "
+                    f"avg_da={da_current.mean().item():.3f}"
                 )
 
         avg_loss = epoch_loss / len(self.train_loader)
         train_metrics = tracker.compute()
 
-        # 记录 epoch loss 用于可视化（不再从日志文件解析）
+        # 记录 epoch loss 用于可视化
         self.epoch_losses.append(avg_loss)
 
         return avg_loss, train_metrics

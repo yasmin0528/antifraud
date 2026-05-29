@@ -1,12 +1,11 @@
 {
   "permissions": {
     "allow": [
-      "Bash(python:*)",
+      "Bash(python3:*)",
+      "Bash(kill:*)",
       "Bash(python -m py_compile:*)",
-      "Bash(python -m:*)",
-      "Bash(chmod:*)",
-      "Bash(bash:*)",
-      "Bash(pip install:*)"
+      "Bash(python:*)",
+      "Bash(pip:*)"
     ],
     "deny": [],
     "ask": []

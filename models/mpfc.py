@@ -217,6 +217,7 @@ class MPFC(nn.Module):
         edge_attr: Optional[torch.Tensor] = None,
         batch: Optional[torch.Tensor] = None,
         transaction_summary: Optional[str] = None,
+        da_signal: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         完整前向传播（大模型.md Step 1 ~ 7）。
@@ -227,6 +228,7 @@ class MPFC(nn.Module):
             edge_attr: [num_edges, edge_attr_dim] 边特征
             batch: [num_nodes] 子图批次索引
             transaction_summary: 交易模式描述（用于 Step 1 LLM 规则生成）
+            da_signal: [num_nodes, 1] 多巴胺RPE调控信号（调节注意力锐利度）
 
         Returns:
             x: [num_nodes, hidden_dim] 更新后的节点 embedding
@@ -247,12 +249,24 @@ class MPFC(nn.Module):
             # MLP 规则偏置（消融实验：去除 LLM 后的效果）
             rule_bias = self.rule_mlp(edge_attr).squeeze(-1)  # [E]
 
+        # ---- 多巴胺调制：RPE 信号调节注意力锐利度 ----
+        # 高 RPE → 放大 rule_bias（使注意力更聚焦于规则匹配的边）
+        # 低 RPE → 缩小 rule_bias（让GNN自由学习）
+        da_scale = 1.0
+        if da_signal is not None:
+            # da_signal 是每个 source 节点的值，按边索引映射到每条边
+            src_nodes = edge_index[0]  # source 节点索引
+            # 每个 source 节点可能对应多条发出的边
+            # 对每条边，使用其 source 节点的 da_signal 值
+            da_for_edges = da_signal[src_nodes].squeeze(-1)  # [num_edges]
+            da_scale = da_for_edges  # 值域 [1.0, 1.0 + rpe_beta]
+
         # ---- Step 3 & 4: Layer-wise Rule-guided GNN 传播 ----
-        # Step 3: Rule-guided attention（规则调控信息传播）
-        # Step 4: 关系推理（图传播）
         for i in range(self.num_gnn_layers):
             residual = self.residual_proj[i](x)
-            x_new = self.gnn_layers[i](x, edge_index, rule_bias)[0]
+            x_new = self.gnn_layers[i](
+                x, edge_index, rule_bias * da_scale
+            )[0]
             x = F.relu(self.layer_norms[i](x_new + residual))
             x = self.dropout(x)
 
@@ -264,7 +278,6 @@ class MPFC(nn.Module):
         x = x * gate
 
         # ---- Step 6: Subgraph Aggregation ----
-        # 从个体 → 团体抽象（high-level reasoning）
         if batch is not None:
             graph_repr = self._global_mean_pool(x, batch)
             logit = self.score_mlp(graph_repr)

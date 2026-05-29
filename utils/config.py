@@ -54,7 +54,8 @@ class CA1Config:
 @dataclass
 class CA3Config:
     emb_dim: int = 128
-    memory_momentum: float = 0.9
+    num_groups: int = 16
+    memory_momentum: float = 0.9   # 保留兼容，新实现未使用
 
 
 @dataclass

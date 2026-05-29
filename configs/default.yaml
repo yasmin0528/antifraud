@@ -40,6 +40,7 @@ model:
   # CA3
   ca3:
     emb_dim: 128
+    num_groups: 16
     memory_momentum: 0.9
 
   # MPFC (GNN)

@@ -35,26 +35,22 @@ def preprocess_data(
     csv_path: str,
     window_size: int = 10,
     save_path: Optional[str] = "preprocessed_data.pt",
-    use_smote: bool = False,
-    smote_ratio: float = 1.0,
     force_reprocess: bool = False,
 ) -> Dict:
     """
-    完整数据预处理管线。
+    完整数据预处理管线（不包含 SMOTE——SMOTE 仅对训练集执行）。
 
+    流程：
     1. 读取 CSV
     2. 排序、编码
     3. 特征工程（金额归一化、时间差）
-    4. 可选 SMOTE 过采样
-    5. 滑动窗口序列构建
-    6. 保存为 .pt 文件
+    4. 滑动窗口序列构建
+    5. 保存为 .pt 文件
 
     Args:
         csv_path: 原始 CSV 路径
         window_size: 滑动窗口大小
         save_path: 保存路径（None 则不保存）
-        use_smote: 是否使用 SMOTE
-        smote_ratio: SMOTE 采样比例
         force_reprocess: 是否强制重新处理
 
     Returns:
@@ -65,6 +61,7 @@ def preprocess_data(
             - receiver_idx: [N]
             - alert_idx: [N]
             - edge_attr: [N, 2]
+            - detection_features: [N, 3]  原始特征（用于训练集SMOTE）
             - n_types, n_accounts, n_groups
     """
     df = pd.read_csv(csv_path)
@@ -107,37 +104,6 @@ def preprocess_data(
     n_accounts = int(account_encoder.classes_.shape[0])
     n_groups_orig = int(df.loc[alert_mask, "ALERT_IDX"].nunique() if alert_mask.any() else 0)
 
-    # SMOTE
-    if use_smote and _HAS_SMOTE:
-        print(f"Applying SMOTE with ratio {smote_ratio}...")
-        features = df[
-            ["TX_AMOUNT_NORM", "TX_TYPE_ID", "TIME_DIFF", "SENDER_IDX", "RECEIVER_IDX", "ALERT_IDX"]
-        ].values
-        labels = df["IS_FRAUD"].values
-        smote = SMOTE(sampling_strategy=smote_ratio, random_state=42)
-        features_resampled, labels_resampled = smote.fit_resample(features, labels)
-
-        # 保存原始的非 SMOTE 数据（用于滑动窗口构建序列）
-        df_original = df.copy()
-        # SMOTE 合成样本作为独立样本，不经过 groupby 滑动窗口
-        df_smote = pd.DataFrame(
-            features_resampled[len(df_original):],  # 只取 SMOTE 合成的新样本
-            columns=["TX_AMOUNT_NORM", "TX_TYPE_ID", "TIME_DIFF", "SENDER_IDX", "RECEIVER_IDX", "ALERT_IDX"],
-        )
-        df_smote["IS_FRAUD"] = labels_resampled[len(df_original):]
-        # 给 SMOTE 样本分配唯一的虚拟账户 ID，避免 groupby 时混在一起
-        max_sender = int(df_original["SENDER_IDX"].max()) + 1
-        df_smote["SENDER_ACCOUNT_ID"] = ["SMOTE_" + str(i) for i in range(len(df_smote))]
-        df_smote["TX_ID"] = np.arange(len(df_smote))
-        df_smote["TIMESTAMP"] = np.arange(len(df_smote))
-
-        # 原始真实数据保持滑动窗口，SMOTE 数据作为独立样本添加到窗口结果中
-        df = df_original
-        print(f"After SMOTE: {len(df_original)} original + {len(df_smote)} synthetic samples, "
-              f"total fraud ratio: {(df_original['IS_FRAUD'].sum() + df_smote['IS_FRAUD'].sum()) / (len(df_original) + len(df_smote)):.3f}")
-    elif use_smote and not _HAS_SMOTE:
-        print("SMOTE requested but imblearn not available. Skipping SMOTE.")
-
     # 滑动窗口构建序列
     sequences = []
     sender_indices: list[int] = []
@@ -145,6 +111,8 @@ def preprocess_data(
     alert_indices: list[int] = []
     edge_attrs: list[list[float]] = []
     labels_list: list[int] = []
+    # 存储滑动窗口最后一步的原始特征，用于训练集 SMOTE
+    detection_features_list: list[list[float]] = []
 
     for _, group in df.groupby("SENDER_ACCOUNT_ID"):
         group = group.reset_index(drop=True)
@@ -161,21 +129,13 @@ def preprocess_data(
             edge_attrs.append(
                 [float(window["TX_AMOUNT_NORM"].iat[-1]), float(window["TX_TYPE_ID"].iat[-1])]
             )
-
-    # 将 SMOTE 合成样本作为独立序列添加到结果中
-    if use_smote and _HAS_SMOTE:
-        for i in range(len(df_smote)):
-            row = df_smote.iloc[i]
-            # 每行特征复制 window_size 次作为序列
-            feat = np.array([row["TX_AMOUNT_NORM"], row["TX_TYPE_ID"], row["TIME_DIFF"]], dtype=np.float32)
-            seq = np.tile(feat, (window_size, 1))
-            sequences.append(seq)
-            labels_list.append(int(row["IS_FRAUD"]))
-            sender_indices.append(int(row["SENDER_IDX"]))
-            receiver_indices.append(int(row["RECEIVER_IDX"]))
-            alert_indices.append(int(row["ALERT_IDX"]))
-            edge_attrs.append([float(row["TX_AMOUNT_NORM"]), float(row["TX_TYPE_ID"])])
-        print(f"Total after sliding window + SMOTE: {len(sequences)} samples")
+            # 存储最后一步的原始 3 维特征，用于 SMOTE
+            last_row = window.iloc[-1]
+            detection_features_list.append([
+                float(last_row["TX_AMOUNT_NORM"]),
+                float(last_row["TX_TYPE_ID"]),
+                float(last_row["TIME_DIFF"]),
+            ])
 
     if len(sequences) == 0:
         raise ValueError(
@@ -188,6 +148,7 @@ def preprocess_data(
     receiver_arr = np.array(receiver_indices, dtype=np.int64)
     alert_arr = np.array(alert_indices, dtype=np.int64)
     edge_attr_arr = np.stack(edge_attrs, axis=0)
+    detection_features_arr = np.array(detection_features_list, dtype=np.float32)
 
     data = {
         "sequences": torch.tensor(sequences, dtype=torch.float32),
@@ -196,6 +157,7 @@ def preprocess_data(
         "receiver_idx": torch.tensor(receiver_arr, dtype=torch.long),
         "alert_idx": torch.tensor(alert_arr, dtype=torch.long),
         "edge_attr": torch.tensor(edge_attr_arr, dtype=torch.float32),
+        "detection_features": torch.tensor(detection_features_arr, dtype=torch.float32),
         "n_types": n_types_orig,
         "n_accounts": n_accounts,
         "n_groups": n_groups_orig,
@@ -206,6 +168,108 @@ def preprocess_data(
         print(f"Preprocessed data saved to {save_path}")
 
     return data
+
+
+def apply_smote_to_train(
+    data: Dict,
+    train_idx: np.ndarray,
+    smote_ratio: float = 1.0,
+    random_state: int = 42,
+) -> Tuple[Dict, np.ndarray]:
+    """
+    仅对训练集应用 SMOTE 过采样。
+
+    SMOTE 在滑动窗口后的特征空间生成合成样本，新样本的特征向量（序列）直接
+    复制最后一步的特征填充整个窗口。
+
+    Args:
+        data: preprocess_data 的输出
+        train_idx: 训练集索引
+        smote_ratio: SMOTE 采样比例
+        random_state: 随机种子
+
+    Returns:
+        data: 在训练集中插入了 SMOTE 合成样本的新数据字典
+        train_idx: 扩展后的训练集索引（包含原始 + SMOTE 样本）
+    """
+    if not _HAS_SMOTE:
+        print("SMOTE requested but imblearn not available. Skipping SMOTE.")
+        return data, train_idx
+
+    # 从 detection_features 中提取训练集样本的特征和标签用于 SMOTE
+    detection_features = data["detection_features"].numpy()
+    labels = data["labels"].numpy()
+
+    train_features = detection_features[train_idx]
+    train_labels = labels[train_idx]
+
+    # 检查训练集是否有两类样本
+    unique_classes = np.unique(train_labels)
+    if len(unique_classes) < 2:
+        print(f"Warning: train set has only {len(unique_classes)} class, skipping SMOTE.")
+        return data, train_idx
+
+    print(f"Applying SMOTE on train set (ratio={smote_ratio})...")
+    smote = SMOTE(sampling_strategy=smote_ratio, random_state=random_state)
+    features_resampled, labels_resampled = smote.fit_resample(train_features, train_labels)
+
+    n_original = len(train_idx)
+    n_synthetic = len(features_resampled) - n_original
+
+    if n_synthetic <= 0:
+        print("No synthetic samples generated by SMOTE.")
+        return data, train_idx
+
+    print(f"SMOTE generated {n_synthetic} synthetic samples.")
+
+    # 为合成样本构建序列：复制特征 feature_dim 次
+    window_size = data["sequences"].size(1)
+    synthetic_feats = features_resampled[n_original:]  # [n_synthetic, 3]
+
+    syn_sequences = np.tile(
+        synthetic_feats[:, np.newaxis, :], (1, window_size, 1)
+    )  # [n_synthetic, window_size, 3]
+    syn_labels = labels_resampled[n_original:]
+    syn_sender = np.full(n_synthetic, -1, dtype=np.int64)
+    syn_receiver = np.full(n_synthetic, -1, dtype=np.int64)
+    syn_alert = np.full(n_synthetic, -1, dtype=np.int64)
+    syn_edge_attr = synthetic_feats[:, :2]  # [n_synthetic, 2]  amount + type
+
+    # 将合成样本拼接到原始数据末尾
+    data["sequences"] = torch.cat([
+        data["sequences"],
+        torch.tensor(syn_sequences, dtype=torch.float32),
+    ], dim=0)
+    data["labels"] = torch.cat([
+        data["labels"],
+        torch.tensor(syn_labels, dtype=torch.float32),
+    ], dim=0)
+    data["sender_idx"] = torch.cat([
+        data["sender_idx"],
+        torch.tensor(syn_sender, dtype=torch.long),
+    ], dim=0)
+    data["receiver_idx"] = torch.cat([
+        data["receiver_idx"],
+        torch.tensor(syn_receiver, dtype=torch.long),
+    ], dim=0)
+    data["alert_idx"] = torch.cat([
+        data["alert_idx"],
+        torch.tensor(syn_alert, dtype=torch.long),
+    ], dim=0)
+    data["edge_attr"] = torch.cat([
+        data["edge_attr"],
+        torch.tensor(syn_edge_attr, dtype=torch.float32),
+    ], dim=0)
+
+    # 扩展训练集索引：原始训练集索引 + 新合成样本索引
+    new_indices = np.arange(len(data["labels"]))
+    synthetic_start = new_indices[-n_synthetic:]
+    train_idx_ext = np.concatenate([train_idx, synthetic_start])
+
+    fraud_ratio = data["labels"][train_idx_ext].mean().item()
+    print(f"Train set after SMOTE: {len(train_idx_ext)} samples, fraud ratio={fraud_ratio:.3f}")
+
+    return data, train_idx_ext
 
 
 def build_batch_graph(
@@ -232,13 +296,33 @@ def build_batch_graph(
         sender_local: [batch_size] 发送方的本地节点索引
     """
     device = sender_idx.device
-    unique_nodes = torch.unique(torch.cat([sender_idx, receiver_idx]))
+    batch_size = sender_idx.size(0)
+
+    # 找出有效节点（sender_idx >= 0，排除 SMOTE 样本）
+    valid_mask = sender_idx >= 0
+    has_invalid = (~valid_mask).any()
+
+    if has_invalid:
+        # SMOTE 样本的 sender_idx=-1: 自成孤点，不参与图结构
+        # 为它们分配新的唯一节点 ID
+        max_orig = sender_idx.max().item()
+        num_invalid = batch_size - valid_mask.sum().item()
+        fake_ids = torch.arange(max_orig + 1, max_orig + 1 + num_invalid, device=device)
+        sender_idx_fixed = sender_idx.clone()
+        sender_idx_fixed[~valid_mask] = fake_ids[:num_invalid]
+        receiver_idx_fixed = receiver_idx.clone()
+        receiver_idx_fixed[~valid_mask] = fake_ids[:num_invalid]
+    else:
+        sender_idx_fixed = sender_idx
+        receiver_idx_fixed = receiver_idx
+
+    unique_nodes = torch.unique(torch.cat([sender_idx_fixed, receiver_idx_fixed]))
     max_idx = int(unique_nodes.max().item())
     mapping = torch.full((max_idx + 1,), -1, dtype=torch.long, device=device)
     mapping[unique_nodes] = torch.arange(unique_nodes.size(0), device=device)
 
-    sender_local = mapping[sender_idx]
-    receiver_local = mapping[receiver_idx]
+    sender_local = mapping[sender_idx_fixed]
+    receiver_local = mapping[receiver_idx_fixed]
     edge_index = torch.stack([sender_local, receiver_local], dim=0)
 
     combined = torch.cat([node_features, score_micro], dim=-1)
@@ -418,21 +502,27 @@ def get_dataloaders(
         random_state=random_state,
     )
 
+    # ---- SMOTE 仅应用在训练集上 ----
+    if use_smote:
+        data, train_idx = apply_smote_to_train(
+            data, train_idx, smote_ratio=smote_ratio, random_state=random_state,
+        )
+        # 使用扩展后的数据重新取 tensor
+        sequences = data["sequences"]
+        labels = data["labels"]
+        sender_idx = data["sender_idx"]
+        receiver_idx = data["receiver_idx"]
+        alert_idx = data["alert_idx"]
+        edge_attr = data["edge_attr"]
+
     train_dataset = TensorDataset(
         sequences, sender_idx, receiver_idx, edge_attr, alert_idx, labels
     )
     train_subset = torch.utils.data.Subset(train_dataset, train_idx)
 
-    train_sampler = get_sampler(labels[train_idx].numpy(), use_smote, smote_ratio)
-
-    if train_sampler is not None:
-        train_loader = DataLoader(
-            train_subset, batch_size=batch_size, sampler=train_sampler, num_workers=num_workers
-        )
-    else:
-        train_loader = DataLoader(
-            train_subset, batch_size=batch_size, shuffle=True, num_workers=num_workers
-        )
+    train_loader = DataLoader(
+        train_subset, batch_size=batch_size, shuffle=True, num_workers=num_workers
+    )
 
     val_loader = None
     if len(val_idx) > 0:
