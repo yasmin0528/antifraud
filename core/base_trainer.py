@@ -293,6 +293,26 @@ class BaseTrainer:
             f"test={self.metadata['test_size']}"
         )
 
+        # 打印验证集标签分布
+        if self.val_loader is not None:
+            val_labels = torch.cat([b[-1].cpu() for b in self.val_loader])
+            val_pos = val_labels.sum().item()
+            val_total = len(val_labels)
+            self.logger.info(
+                f"Val labels: {int(val_pos)} positive / {val_total} total "
+                f"({100 * val_pos / val_total:.2f}%)"
+            )
+
+        # 打印测试集标签分布
+        if self.test_loader is not None:
+            test_labels = torch.cat([b[-1].cpu() for b in self.test_loader])
+            test_pos = test_labels.sum().item()
+            test_total = len(test_labels)
+            self.logger.info(
+                f"Test labels: {int(test_pos)} positive / {test_total} total "
+                f"({100 * test_pos / test_total:.2f}%)"
+            )
+
     def _train_epoch(self) -> Tuple[float, Dict]:
         """
         训练一个 epoch —— 多巴胺RPE调控循环。
@@ -372,10 +392,28 @@ class BaseTrainer:
             pred_logit = logit[sender_local]
             pred_prob = prob[sender_local].squeeze(-1)
 
-            # ---- 损失（标准 BCE，RPE 已作为前向控制信号） ----
-            loss = nn.BCEWithLogitsLoss(
-                pos_weight=torch.tensor(cfg.train.pos_weight, device=self.device)
-            )(pred_logit, label.float().view(-1, 1))
+            # ---- 损失函数 ----
+            # 支持 Focal Loss（focal_gamma > 0）和标准 BCE（focal_gamma <= 0）
+            gamma = getattr(cfg.train, 'focal_gamma', 0.0)
+            if gamma > 0:
+                # Focal Loss with class-balanced alpha
+                pos_weight = getattr(cfg.train, 'pos_weight', 1.0)
+                alpha_pos = pos_weight / (pos_weight + 1.0)
+                alpha_neg = 1.0 / (pos_weight + 1.0)
+
+                bce = nn.functional.binary_cross_entropy_with_logits(
+                    pred_logit, label.float().view(-1, 1), reduction='none'
+                )
+                prob = torch.sigmoid(pred_logit)
+                pt = torch.where(label.float().view(-1, 1) == 1.0, prob, 1.0 - prob)
+                alpha = torch.where(label.float().view(-1, 1) == 1.0, alpha_pos, alpha_neg)
+                focal_weight = alpha * (1.0 - pt) ** gamma
+                loss = (focal_weight * bce).mean()
+            else:
+                # 标准 BCE（pos_weight 用于类别平衡）
+                loss = nn.BCEWithLogitsLoss(
+                    pos_weight=torch.tensor(cfg.train.pos_weight, device=self.device)
+                )(pred_logit, label.float().view(-1, 1))
 
             loss.backward()
 
