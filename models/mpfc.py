@@ -254,12 +254,15 @@ class MPFC(nn.Module):
         # 低 RPE → 缩小 rule_bias（让GNN自由学习）
         da_scale = 1.0
         if da_signal is not None:
-            # da_signal 是每个 source 节点的值，按边索引映射到每条边
-            src_nodes = edge_index[0]  # source 节点索引
-            # 每个 source 节点可能对应多条发出的边
-            # 对每条边，使用其 source 节点的 da_signal 值
-            da_for_edges = da_signal[src_nodes].squeeze(-1)  # [num_edges]
-            da_scale = da_for_edges  # 值域 [1.0, 1.0 + rpe_beta]
+            # 处理标量 da_signal（VTA 全局广播模式）或向量 da_signal（per-node）
+            if isinstance(da_signal, (int, float)):
+                da_scale = da_signal  # scalar broadcast
+            else:
+                # da_signal: [num_nodes, 1] per-node values
+                # 按边索引的 source 节点映射到每条边
+                src_nodes = edge_index[0]  # source 节点索引
+                da_for_edges = da_signal[src_nodes].squeeze(-1)  # [num_edges]
+                da_scale = da_for_edges  # 值域 [1.0, 1.0 + rpe_beta]
 
         # ---- Step 3 & 4: Layer-wise Rule-guided GNN 传播 ----
         for i in range(self.num_gnn_layers):
