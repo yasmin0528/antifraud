@@ -390,25 +390,18 @@ class BaseTrainer:
             epoch_loss += loss.item()
             tracker.update(pred_prob.detach().cpu(), label.cpu())
 
-            # ---- 多巴胺RPE信号更新（为下一 batch 准备） ----
+            # ---- 多巴胺RPE信号更新（为下一 batch 的全局调质准备） ----
             with torch.no_grad():
                 da_current = compute_da_signal(
                     prob=pred_prob.unsqueeze(-1),
                     y=label,
                     rpe_beta=cfg.train.rpe_beta,
-                    momentum=0.0,  # 不进行时序平滑，batch间差异本身就是RPE信号
+                    momentum=0.0,
                     prev_da=None,
                 )
-                # 将 da_signal 映射到每个节点（通过 sender_local）
-                node_da = torch.zeros(node_x.size(0), 1, device=self.device)
-                node_da.index_add_(0, sender_local, da_current)
-                node_counts = torch.zeros(node_x.size(0), 1, device=self.device)
-                node_counts.index_add_(
-                    0, sender_local,
-                    torch.ones_like(da_current, device=self.device),
-                )
-                node_da = node_da / node_counts.clamp(min=1.0)
-                prev_da_signal = node_da
+                # 用标量 da_signal（batch 均值）作为跨 batch 的全局调质信号
+                # 符合生物学 VTA 多巴胺为全局调质的特性
+                prev_da_signal = da_current.mean().item()
 
             # 日志
             if cfg.train.log_interval > 0 and batch_idx % cfg.train.log_interval == 0:

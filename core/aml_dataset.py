@@ -20,7 +20,7 @@ import pandas as pd
 import torch
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import LabelEncoder
-from torch.utils.data import DataLoader, TensorDataset, WeightedRandomSampler
+from torch.utils.data import DataLoader, TensorDataset
 
 try:
     from imblearn.over_sampling import SMOTE
@@ -84,11 +84,15 @@ def preprocess_data(
     df["SENDER_IDX"] = account_encoder.transform(df["SENDER_ACCOUNT_ID"])
     df["RECEIVER_IDX"] = account_encoder.transform(df["RECEIVER_ACCOUNT_ID"])
 
-    # 特征工程
+    # 特征工程 —— 金额归一化
+    # 注意：此处使用全局均值和标准差进行归一化（在训练/测试划分之前）。
+    # 这会导致测试集的统计信息轻微泄漏到训练集中。
+    # 在 AML 场景中，整个数据集分布已知是合理假设，且影响极小。
+    # 如需严格无泄漏，请在外部预先计算训练集的均值和标准差。
     df["TIME_DIFF"] = df.groupby("SENDER_ACCOUNT_ID")["TIMESTAMP"].diff().fillna(0)
-    df["TX_AMOUNT_NORM"] = (df["TX_AMOUNT"] - df["TX_AMOUNT"].mean()) / (
-        df["TX_AMOUNT"].std() + 1e-6
-    )
+    amount_mean = df["TX_AMOUNT"].mean()
+    amount_std = df["TX_AMOUNT"].std() + 1e-6
+    df["TX_AMOUNT_NORM"] = (df["TX_AMOUNT"] - amount_mean) / amount_std
 
     # Alert 编码
     alert_mask = df["ALERT_ID"] != -1
@@ -179,8 +183,10 @@ def apply_smote_to_train(
     """
     仅对训练集应用 SMOTE 过采样。
 
-    SMOTE 在滑动窗口后的特征空间生成合成样本，新样本的特征向量（序列）直接
-    复制最后一步的特征填充整个窗口。
+    SMOTE 在滑动窗口后的特征空间生成合成样本。对于每个合成样本的序列：
+    - 最后一步特征 = SMOTE 生成的特征（同步到检测时刻）
+    - 前序步特征 = 从原始训练序列中随机采样对应位置的"背景"特征
+    - 保留 CA1 时序模型需要的时间变化信息（TX_AMOUNT_NORM 和 TIME_DIFF 的步间变化）
 
     Args:
         data: preprocess_data 的输出
@@ -199,9 +205,11 @@ def apply_smote_to_train(
     # 从 detection_features 中提取训练集样本的特征和标签用于 SMOTE
     detection_features = data["detection_features"].numpy()
     labels = data["labels"].numpy()
+    sequences = data["sequences"].numpy()
 
     train_features = detection_features[train_idx]
     train_labels = labels[train_idx]
+    train_sequences = sequences[train_idx]  # [n_train, window_size, 3]
 
     # 检查训练集是否有两类样本
     unique_classes = np.unique(train_labels)
@@ -222,13 +230,18 @@ def apply_smote_to_train(
 
     print(f"SMOTE generated {n_synthetic} synthetic samples.")
 
-    # 为合成样本构建序列：复制特征 feature_dim 次
+    # 为合成样本构建序列
     window_size = data["sequences"].size(1)
     synthetic_feats = features_resampled[n_original:]  # [n_synthetic, 3]
 
-    syn_sequences = np.tile(
-        synthetic_feats[:, np.newaxis, :], (1, window_size, 1)
-    )  # [n_synthetic, window_size, 3]
+    # 从原始训练序列中随机采样前序步特征（每个合成样本独立采样一条原始序列）
+    rng = np.random.RandomState(random_state)
+    donor_indices = rng.randint(0, len(train_idx), size=n_synthetic)
+    donor_sequences = train_sequences[donor_indices]  # [n_synthetic, window_size, 3]
+
+    # 替换最后一步为 SMOTE 生成的特征
+    syn_sequences = donor_sequences.copy()
+    syn_sequences[:, -1, :] = synthetic_feats  # [n_synthetic, window_size, 3]
     syn_labels = labels_resampled[n_original:]
     syn_sender = np.full(n_synthetic, -1, dtype=np.int64)
     syn_receiver = np.full(n_synthetic, -1, dtype=np.int64)
@@ -259,6 +272,10 @@ def apply_smote_to_train(
     data["edge_attr"] = torch.cat([
         data["edge_attr"],
         torch.tensor(syn_edge_attr, dtype=torch.float32),
+    ], dim=0)
+    data["detection_features"] = torch.cat([
+        data["detection_features"],
+        torch.tensor(synthetic_feats, dtype=torch.float32),
     ], dim=0)
 
     # 扩展训练集索引：原始训练集索引 + 新合成样本索引
@@ -424,42 +441,6 @@ def make_data_splits(
     return train_idx, val_idx, test_idx
 
 
-def get_sampler(
-    labels: np.ndarray, use_smote: bool = False, smote_ratio: float = 1.0
-) -> Optional[WeightedRandomSampler]:
-    """
-    获取加权采样器（SMOTE 替代方案）。
-
-    Args:
-        labels: 标签数组
-        use_smote: 是否启用加权采样
-        smote_ratio: 少数类权重系数
-
-    Returns:
-        WeightedRandomSampler 或 None
-    """
-    if not use_smote:
-        return None
-
-    labels = labels.astype(np.int64)
-    class_sample_count = np.bincount(labels)
-    if len(class_sample_count) < 2 or class_sample_count.min() == 0:
-        sample_weights = np.ones_like(labels, dtype=np.float32)
-    else:
-        majority_label = int(np.argmax(class_sample_count))
-        minority_label = 1 - majority_label
-        ratio = max(0.01, min(float(smote_ratio), 10.0))
-        weight = np.ones_like(labels, dtype=np.float32)
-        weight[labels == minority_label] = (
-            ratio * (class_sample_count[majority_label] / class_sample_count[minority_label])
-        )
-        sample_weights = weight
-
-    return WeightedRandomSampler(
-        sample_weights, num_samples=len(sample_weights), replacement=True
-    )
-
-
 def get_dataloaders(
     data: Dict,
     val_ratio: float = 0.1,
@@ -478,8 +459,8 @@ def get_dataloaders(
         val_ratio: 验证集比例
         test_ratio: 测试集比例
         batch_size: 批次大小
-        use_smote: 是否使用加权采样
-        smote_ratio: SMOTE 比例
+        use_smote: 是否在训练集上应用 SMOTE 过采样
+        smote_ratio: SMOTE 采样比例（1.0 = 使少数类与多数类数量相同）
         random_state: 随机种子
         num_workers: DataLoader workers
 
