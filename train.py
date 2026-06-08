@@ -98,6 +98,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--gnn_heads", type=int, default=None)
 
     # 数据
+    parser.add_argument("--dataset", type=str, default=None,
+                        help='数据集类型: "aml" | "cryptopia"')
     parser.add_argument("--data_path", type=str, default=None)
     parser.add_argument("--preprocessed_path", type=str, default=None)
     parser.add_argument("--use_smote", action="store_true")
@@ -171,6 +173,8 @@ def build_overrides(args: argparse.Namespace) -> Dict:
         overrides.setdefault("model", {}).setdefault("mpfc", {})["gnn_heads"] = args.gnn_heads
 
     # 数据
+    if args.dataset:
+        overrides.setdefault("data", {})["dataset"] = args.dataset
     if args.data_path:
         overrides.setdefault("data", {})["data_path"] = args.data_path
     if args.preprocessed_path:
@@ -263,9 +267,23 @@ def setup_experiment(
         main_config = os.path.join(base_dir, main_config)
     config_dir = os.path.dirname(os.path.abspath(main_config))
     if cfg.data.data_path and not os.path.isabs(cfg.data.data_path):
-        cfg.data.data_path = os.path.join(config_dir, cfg.data.data_path)
+        # 优先尝试相对于配置文件目录
+        config_rel = os.path.join(config_dir, cfg.data.data_path)
+        # 如果不存在，尝试相对于项目根目录
+        project_rel = os.path.join(base_dir, cfg.data.data_path)
+        if os.path.exists(config_rel):
+            cfg.data.data_path = config_rel
+        elif os.path.exists(project_rel):
+            cfg.data.data_path = project_rel
+        else:
+            cfg.data.data_path = config_rel  # 默认用 config 相对路径
     if cfg.data.preprocessed_path and not os.path.isabs(cfg.data.preprocessed_path):
         cfg.data.preprocessed_path = os.path.join(config_dir, cfg.data.preprocessed_path)
+    # 对于目录型数据源（如 CryptopiaHacker），创建预处理文件到目录下
+    if cfg.data.dataset == "cryptopia":
+        preprocessed_dir = os.path.dirname(cfg.data.preprocessed_path)
+        if preprocessed_dir and not os.path.exists(preprocessed_dir):
+            os.makedirs(preprocessed_dir, exist_ok=True)
 
     # 保存最终配置到实验输出目录（供 test/resume 模式复用）
     saved_config_path = os.path.join(output_dir, "config.yaml")

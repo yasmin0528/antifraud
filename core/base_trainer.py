@@ -28,6 +28,10 @@ from core.aml_dataset import (
     get_dataloaders,
     preprocess_data,
 )
+from core.aml_dataset_cryptopia import (
+    get_cryptopia_dataloaders,
+    preprocess_cryptopia_data,
+)
 from models import CA1_TTPM, CA3_AGM, MPFC
 from models.vta import compute_da_signal
 from utils import (
@@ -253,19 +257,29 @@ class BaseTrainer:
         self.logger.info(f"Optimizer: Adam (lr={cfg.train.lr}, weight_decay={cfg.train.weight_decay})")
 
     def _build_dataloaders(self):
-        """构建 DataLoader。"""
+        """构建 DataLoader——支持原始 AML 和 CryptopiaHacker 两种数据集。"""
+        cfg = self.cfg
+        dataset_type = cfg.data.dataset
+
+        if dataset_type == "cryptopia":
+            self._build_cryptopia_dataloaders()
+        else:
+            self._build_aml_dataloaders()
+
+    def _build_aml_dataloaders(self):
+        """原始 AML 数据集 DataLoader 构建。"""
         cfg = self.cfg
         data_path = cfg.data.preprocessed_path
 
         if not os.path.exists(data_path) or cfg.data.regenerate:
-            self.logger.info(f"Preprocessing data from {cfg.data.data_path}...")
+            self.logger.info(f"Preprocessing AML data from {cfg.data.data_path}...")
             data = preprocess_data(
                 csv_path=cfg.data.data_path,
                 window_size=self.cfg.model.ca1.feature_dim,
                 save_path=data_path,
             )
         else:
-            self.logger.info(f"Loading preprocessed data from {data_path}...")
+            self.logger.info(f"Loading preprocessed AML data from {data_path}...")
             data = torch.load(data_path)
             required = ["sequences", "labels", "sender_idx", "receiver_idx", "alert_idx", "edge_attr", "detection_features"]
             if not all(k in data for k in required):
@@ -289,6 +303,68 @@ class BaseTrainer:
 
         self.logger.info(
             f"Data: train={self.metadata['train_size']}, "
+            f"val={self.metadata['val_size']}, "
+            f"test={self.metadata['test_size']}"
+        )
+
+        # 打印验证集标签分布
+        if self.val_loader is not None:
+            val_labels = torch.cat([b[-1].cpu() for b in self.val_loader])
+            val_pos = val_labels.sum().item()
+            val_total = len(val_labels)
+            self.logger.info(
+                f"Val labels: {int(val_pos)} positive / {val_total} total "
+                f"({100 * val_pos / val_total:.2f}%)"
+            )
+
+        # 打印测试集标签分布
+        if self.test_loader is not None:
+            test_labels = torch.cat([b[-1].cpu() for b in self.test_loader])
+            test_pos = test_labels.sum().item()
+            test_total = len(test_labels)
+            self.logger.info(
+                f"Test labels: {int(test_pos)} positive / {test_total} total "
+                f"({100 * test_pos / test_total:.2f}%)"
+            )
+
+    def _build_cryptopia_dataloaders(self):
+        """CryptopiaHacker 数据集 DataLoader 构建。"""
+        cfg = self.cfg
+        data_path = cfg.data.preprocessed_path
+
+        if not os.path.exists(data_path) or cfg.data.regenerate:
+            self.logger.info(f"Preprocessing Cryptopia data from {cfg.data.data_path}...")
+            data = preprocess_cryptopia_data(
+                data_dir=cfg.data.data_path,
+                window_size=cfg.data.window_size,
+                save_path=data_path,
+            )
+        else:
+            self.logger.info(f"Loading preprocessed Cryptopia data from {data_path}...")
+            data = torch.load(data_path)
+            required = ["sequences", "labels", "sender_idx", "receiver_idx",
+                        "alert_idx", "edge_attr", "detection_features"]
+            if not all(k in data for k in required):
+                self.logger.info("Preprocessed data outdated or incompatible, reprocessing...")
+                data = preprocess_cryptopia_data(
+                    data_dir=cfg.data.data_path,
+                    window_size=cfg.data.window_size,
+                    save_path=data_path,
+                )
+
+        self.train_loader, self.val_loader, self.test_loader, self.metadata = get_cryptopia_dataloaders(
+            data=data,
+            val_ratio=cfg.data.val_ratio,
+            test_ratio=cfg.data.test_ratio,
+            batch_size=cfg.data.batch_size,
+            use_smote=cfg.data.use_smote,
+            smote_ratio=cfg.data.smote_ratio,
+            random_state=cfg.experiment.seed,
+            num_workers=cfg.data.num_workers,
+        )
+
+        self.logger.info(
+            f"Cryptopia Data: train={self.metadata['train_size']}, "
             f"val={self.metadata['val_size']}, "
             f"test={self.metadata['test_size']}"
         )

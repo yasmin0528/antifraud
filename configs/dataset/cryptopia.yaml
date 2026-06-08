@@ -1,0 +1,22 @@
+# CryptopiaHacker 数据集配置
+# 使用方式:
+#   python train.py --config configs/default.yaml --config configs/dataset/cryptopia.yaml
+#   或: python train.py --config configs/dataset/cryptopia.yaml
+data:
+  dataset: "cryptopia"
+  data_path: "CryptopiaHacker"               # 数据目录路径
+  preprocessed_path: "preprocessed_cryptopia.pt"
+  regenerate: false
+  val_ratio: 0.1
+  test_ratio: 0.1
+  use_smote: true
+  smote_ratio: 1.0
+  batch_size: 32
+  num_workers: 0
+  window_size: 5                             # 滑动窗口大小
+
+# CryptopiaHacker 每步特征为 [amount_norm, tx_type(=0), time_diff] 共3维
+model:
+  ca1:
+    feature_dim: 3                           # 每步特征维度
+    hidden_dim: 128

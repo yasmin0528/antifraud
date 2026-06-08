@@ -43,6 +43,7 @@ class DataConfig:
     smote_ratio: float = 1.0
     batch_size: int = 32
     num_workers: int = 0
+    window_size: int = 10                     # 滑动窗口大小（cryptopia 数据集使用）
 
 
 @dataclass

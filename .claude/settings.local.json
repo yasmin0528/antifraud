@@ -5,7 +5,10 @@
       "Bash(kill:*)",
       "Bash(python -m py_compile:*)",
       "Bash(python:*)",
-      "Bash(pip:*)"
+      "Bash(pip:*)",
+      "Bash(awk:*)",
+      "Read(//mnt/e/反洗钱/**)",
+      "Bash(find:*)"
     ],
     "deny": [],
     "ask": []
