@@ -24,6 +24,8 @@ import numpy as np
 import torch
 
 from core.base_trainer import BaseTrainer
+from core.graph_trainer import GraphNodeTrainer
+from core.tabular_trainer import TabularTrainer
 from utils import Config, Logger, load_config, merge_config, set_seed
 
 
@@ -98,7 +100,13 @@ class ExperimentRunner:
     def _run_single(self, cfg: Config) -> Dict[str, Any]:
         """运行单个实验并返回结果。"""
         set_seed(cfg.experiment.seed)
-        trainer = BaseTrainer(cfg)
+
+        # 根据数据集类型选择训练器
+        if cfg.data.dataset == "cryptopia_graph":
+            trainer = GraphNodeTrainer(cfg)
+        else:
+            trainer = BaseTrainer(cfg)
+
         try:
             result = trainer.train()
         except Exception as e:

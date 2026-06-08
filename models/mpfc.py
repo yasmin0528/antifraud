@@ -54,7 +54,9 @@ class MPFC(nn.Module):
     ):
         super().__init__()
 
-        self.input_dim = emb_dim + 1  # CA3 emb_dim + CA1 score_micro
+        self.input_dim = emb_dim + 1  # CA3 emb_dim + CA1 score_micro (input also includes static_feat concatenated in _encode_all_nodes)
+        self.expected_input_dim = emb_dim + 1
+        self.input_proj = None  # lazily created when actual input dim differs
         self.edge_attr_dim = edge_attr_dim
         self.hidden_dim = hidden_dim
         self.num_gnn_layers = num_gnn_layers
@@ -78,7 +80,7 @@ class MPFC(nn.Module):
         self.layer_norms = nn.ModuleList()
 
         for i in range(num_gnn_layers):
-            in_dim = self.input_dim if i == 0 else hidden_dim
+            in_dim = self.expected_input_dim if i == 0 else hidden_dim
             out_dim = hidden_dim
 
             self.gnn_layers.append(
@@ -228,7 +230,9 @@ class MPFC(nn.Module):
             edge_attr: [num_edges, edge_attr_dim] 边特征
             batch: [num_nodes] 子图批次索引
             transaction_summary: 交易模式描述（用于 Step 1 LLM 规则生成）
-            da_signal: [num_nodes, 1] 多巴胺RPE调控信号（调节注意力锐利度）
+            da_signal: [num_nodes, 1] 多巴胺RPE调控信号（同时调控4个维度：
+                        da_scale→注意力锐利度, da_gate_sharp→门控决策锐度,
+                        da_msg_boost→消息强度, da_temp_inv→输出温度）
 
         Returns:
             x: [num_nodes, hidden_dim] 更新后的节点 embedding
@@ -249,20 +253,52 @@ class MPFC(nn.Module):
             # MLP 规则偏置（消融实验：去除 LLM 后的效果）
             rule_bias = self.rule_mlp(edge_attr).squeeze(-1)  # [E]
 
-        # ---- 多巴胺调制：RPE 信号调节注意力锐利度 ----
-        # 高 RPE → 放大 rule_bias（使注意力更聚焦于规则匹配的边）
-        # 低 RPE → 缩小 rule_bias（让GNN自由学习）
+        # ---- 多巴胺调制：RPE 信号在多个维度调控模型行为 ----
+        # 类脑机制：VTA 多巴胺信号作为全局神经调质，同时影响：
+        # 1. 注意力锐利度：高 RPE → 规则导向注意力更强（聚焦关键边）
+        # 2. 任务门控锐度：高 RPE → 目标选择更果断（接近 0/1）
+        # 3. GNN 消息强度：高 RPE → 消息传递更强（关注异常传播）
+        # 4. 输出 sigmoid 温度：高 RPE → 输出更极化（锐利决策）
         da_scale = 1.0
+        da_gate_sharp = 1.0
+        da_msg_boost = 1.0
+        da_temp_inv = 1.0
         if da_signal is not None:
-            # 处理标量 da_signal（VTA 全局广播模式）或向量 da_signal（per-node）
             if isinstance(da_signal, (int, float)):
-                da_scale = da_signal  # scalar broadcast
+                da_raw = da_signal  # scalar broadcast
+            elif da_signal.numel() == 1:
+                da_raw = da_signal.item()
             else:
-                # da_signal: [num_nodes, 1] per-node values
-                # 按边索引的 source 节点映射到每条边
-                src_nodes = edge_index[0]  # source 节点索引
-                da_for_edges = da_signal[src_nodes].squeeze(-1)  # [num_edges]
-                da_scale = da_for_edges  # 值域 [1.0, 1.0 + rpe_beta]
+                src_nodes = edge_index[0]
+                da_raw = da_signal[src_nodes].squeeze(-1)
+
+            # DA 信号映射到 4 个调控维度，每个维度的敏感度不同
+            # 归一化 DA 到 [0, 1] 范围： (da - 1.0) / rpe_beta
+            da_norm = (da_raw - 1.0) / 1.5  # rpe_beta ≈ 1.5, 输出 [0, 1]
+            da_norm = max(0.0, min(1.0, da_norm))  # clamp
+
+            # 1. 注意力锐利度：da_scale ∈ [1.0, 2.5]
+            # RPE=0 时 da_scale=1.0（正常），RPE=1 时 da_scale=~2.5（高度聚焦）
+            da_scale = 1.0 + 1.5 * da_norm
+
+            # 2. 任务门控锐利度：da_gate_sharp ∈ [1.0, 3.0]
+            # sigmoid(x * gate_sharp) 在 x=0 附近更陡峭
+            da_gate_sharp = 1.0 + 2.0 * da_norm
+
+            # 3. 消息强度增强：da_msg_boost ∈ [1.0, 1.3]
+            # GNN 层间的消息传递强度微调
+            da_msg_boost = 1.0 + 0.3 * da_norm
+
+            # 4. 输出温度（逆温度）：da_temp_inv ∈ [0.8, 1.5]
+            # 高 RPE → 逆温度 > 1 → 输出更极化（锐利决策）
+            # 低 RPE → 逆温度 < 1 → 输出更平滑（保留不确定性）
+            da_temp_inv = 0.8 + 0.7 * da_norm
+
+        # ---- 输入维度投影（支持实际输入维度 != expected_input_dim） ----
+        if x.size(-1) != self.expected_input_dim:
+            if self.input_proj is None:
+                self.input_proj = nn.Linear(x.size(-1), self.expected_input_dim, device=x.device)
+            x = self.input_proj(x)
 
         # ---- Step 3 & 4: Layer-wise Rule-guided GNN 传播 ----
         for i in range(self.num_gnn_layers):
@@ -270,13 +306,16 @@ class MPFC(nn.Module):
             x_new = self.gnn_layers[i](
                 x, edge_index, rule_bias * da_scale
             )[0]
+            # da_msg_boost: 高 RPE 时增强 GNN 消息强度（高估异常传播，低估则弱化）
+            x_new = x_new * da_msg_boost
             x = F.relu(self.layer_norms[i](x_new + residual))
             x = self.dropout(x)
 
         # ---- Step 5: Task-guided Gating ----
         # 目标驱动注意：强化与洗钱检测相关的节点，抑制无关节点
-        basic_gate = torch.sigmoid((x * self.task_vector).sum(dim=-1, keepdim=True))
-        adaptive_gate = torch.sigmoid(self.task_gate_mlp(x))
+        # da_gate_sharp: 高 RPE → gate 更逼近 0/1（锐利决策）
+        basic_gate = torch.sigmoid((x * self.task_vector).sum(dim=-1, keepdim=True) * da_gate_sharp)
+        adaptive_gate = torch.sigmoid(self.task_gate_mlp(x) * da_gate_sharp)
         gate = 0.7 * basic_gate + 0.3 * adaptive_gate
         x = x * gate
 
@@ -284,12 +323,14 @@ class MPFC(nn.Module):
         if batch is not None:
             graph_repr = self._global_mean_pool(x, batch)
             logit = self.score_mlp(graph_repr)
-            prob = torch.sigmoid(logit)
+            # da_temp_inv: 逆温度调制输出锐利度
+            prob = torch.sigmoid(logit * da_temp_inv)
             return x, logit, prob
 
         # ---- Step 7: 输出 ----
         logit = self.score_mlp(x)
-        prob = torch.sigmoid(logit)
+        # da_temp_inv: 高 RPE → 输出更极化，低 RPE → 保留不确定性
+        prob = torch.sigmoid(logit * da_temp_inv)
         return x, logit, prob
 
     def get_attention_weights(self) -> Optional[List[torch.Tensor]]:

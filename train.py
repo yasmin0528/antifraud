@@ -280,7 +280,7 @@ def setup_experiment(
     if cfg.data.preprocessed_path and not os.path.isabs(cfg.data.preprocessed_path):
         cfg.data.preprocessed_path = os.path.join(config_dir, cfg.data.preprocessed_path)
     # 对于目录型数据源（如 CryptopiaHacker），创建预处理文件到目录下
-    if cfg.data.dataset == "cryptopia":
+    if cfg.data.dataset in ("cryptopia", "cryptopia_graph"):
         preprocessed_dir = os.path.dirname(cfg.data.preprocessed_path)
         if preprocessed_dir and not os.path.exists(preprocessed_dir):
             os.makedirs(preprocessed_dir, exist_ok=True)

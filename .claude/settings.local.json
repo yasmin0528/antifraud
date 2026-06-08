@@ -8,7 +8,8 @@
       "Bash(pip:*)",
       "Bash(awk:*)",
       "Read(//mnt/e/反洗钱/**)",
-      "Bash(find:*)"
+      "Bash(find:*)",
+      "Bash(cat:*)"
     ],
     "deny": [],
     "ask": []
