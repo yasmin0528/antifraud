@@ -1,0 +1,85 @@
+# ============================================================
+# Baseline: CryptopiaHacker 图节点分类 —— 完整模型
+# 使用方式:
+#   python train.py --config configs/baseline_cryptopia_graph.yaml --name cryptopia_baseline
+# ============================================================
+
+# -------- 继承默认配置的字段（只覆盖需要修改的） --------
+
+experiment:
+  seed: 42
+  output_dir: "outputs"
+  device: "auto"
+  mode: "train"
+
+# -------- 数据配置 --------
+data:
+  dataset: "cryptopia_graph"
+  data_path: "CryptopiaHacker"
+  preprocessed_path: "preprocessed_cryptopia_graph.pt"
+  regenerate: false
+  val_ratio: 0.1
+  test_ratio: 0.1
+  use_smote: false
+  batch_size: 128
+  window_size: 50
+  num_workers: 4
+
+# -------- 模型配置 --------
+model:
+  name: "antifraud"
+  hidden_dim: 128
+  dim_type: 16
+  dropout: 0.2
+  edge_attr_dim: 3
+
+  ca1:
+    feature_dim: 3
+    hidden_dim: 128
+
+  ca3:
+    emb_dim: 128
+    num_groups: 16
+    memory_momentum: 0.9
+
+  mpfc:
+    gnn_layers: 2
+    gnn_heads: 4
+
+  llm:
+    model_name: "qwen"
+    use_api: true
+    api_url: "http://127.0.0.1:23333/v1/chat/completions"
+    api_key: null
+    rule_update_frequency: 500
+    max_rules: 10
+
+# -------- 训练配置 --------
+train:
+  epochs: 30
+  lr: 0.001
+  weight_decay: 0.0001
+  pos_weight: 5.0
+  focal_gamma: 2.0
+  rpe_beta: 1.5
+  patience: 10
+  grad_clip: 1.0
+  log_interval: 200
+
+# -------- 消融（默认关闭） --------
+ablation:
+  enabled: false
+
+# -------- 多种子（默认关闭） --------
+multi_seed:
+  enabled: false
+
+# -------- 可视化 --------
+visualization:
+  enabled: true
+  save_figures: true
+  plot_loss: true
+  plot_roc: true
+  plot_tsne: false
+  plot_attention: false
+  plot_model_graph: false
