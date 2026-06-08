@@ -15,6 +15,8 @@ VTA 多巴胺神经元编码奖励预测误差（Reward Prediction Error），
 4. RPE 越高 → 学习信号越强 → 模型更关注困难样本
 """
 
+from typing import Optional
+
 import torch
 
 
