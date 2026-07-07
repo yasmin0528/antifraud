@@ -1,7 +1,7 @@
 data:
   dataset: "amlsim_li"
-  data_path: "../../../AMLSIM"
-  preprocessed_path: "../../../preprocessed_cache/preprocessed_amlsim_li.pt"
+  data_path: "../../AMLSIM"
+  preprocessed_path: "../../preprocessed_cache/preprocessed_amlsim_li.pt"
   regenerate: false
   val_ratio: 0.1
   test_ratio: 0.1

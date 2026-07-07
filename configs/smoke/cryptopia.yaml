@@ -3,8 +3,8 @@ experiment:
 
 data:
   dataset: "cryptopia"
-  data_path: "../../../CryptopiaHacker"
-  preprocessed_path: "../../../preprocessed_cache/preprocessed_cryptopia.pt"
+  data_path: "../../CryptopiaHacker"
+  preprocessed_path: "../../preprocessed_cache/preprocessed_cryptopia.pt"
   num_workers: 0
 
 train:
