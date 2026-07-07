@@ -14,14 +14,14 @@ from typing import List, Dict, Optional
 
 
 DEFAULT_RULES: List[Dict] = [
-    {"rule": "IF amount > 10000 AND freq > 5 THEN suspicious", "confidence": 0.8},
-    {"rule": "IF circular_transfer_detected THEN suspicious", "confidence": 0.9},
-    {"rule": "IF amount > 50000 AND single_transaction THEN suspicious", "confidence": 0.7},
-    {"rule": "IF freq > 10 AND same_counterparty THEN suspicious", "confidence": 0.6},
-    {"rule": "IF amount > 100000 THEN suspicious", "confidence": 0.85},
-    {"rule": "IF amount > 20000 AND tx_type == rapid THEN suspicious", "confidence": 0.75},
-    {"rule": "IF layered_transfer_detected THEN suspicious", "confidence": 0.85},
-    {"rule": "IF amount_near_threshold AND freq_high THEN suspicious", "confidence": 0.65},
+    {"rule": "IF amount > 10000 AND freq > 5 THEN suspicious", "confidence": 0.8, "rule_type": "high_frequency", "thresholds": {"amount_gt": 10000, "freq_gt": 5}, "source": "fallback"},
+    {"rule": "IF circular_transfer_detected THEN suspicious", "confidence": 0.9, "rule_type": "cycle", "thresholds": {}, "source": "fallback"},
+    {"rule": "IF amount > 50000 AND single_transaction THEN suspicious", "confidence": 0.7, "rule_type": "large_amount", "thresholds": {"amount_gt": 50000}, "source": "fallback"},
+    {"rule": "IF freq > 10 AND same_counterparty THEN suspicious", "confidence": 0.6, "rule_type": "high_frequency", "thresholds": {"freq_gt": 10}, "source": "fallback"},
+    {"rule": "IF amount > 100000 THEN suspicious", "confidence": 0.85, "rule_type": "large_amount", "thresholds": {"amount_gt": 100000}, "source": "fallback"},
+    {"rule": "IF amount > 20000 AND tx_type == rapid THEN suspicious", "confidence": 0.75, "rule_type": "rapid_transfer", "thresholds": {"amount_gt": 20000}, "source": "fallback"},
+    {"rule": "IF layered_transfer_detected THEN suspicious", "confidence": 0.85, "rule_type": "layering", "thresholds": {}, "source": "fallback"},
+    {"rule": "IF amount_near_threshold AND freq_high THEN suspicious", "confidence": 0.65, "rule_type": "structuring", "thresholds": {"near_threshold": True}, "source": "fallback"},
 ]
 
 
@@ -110,8 +110,9 @@ class LLMInterface:
                     f"To use LLM, provide a valid --llm_api_url."
                 )
 
-        self.cache.set(transaction_summary, rules)
-        return rules
+        normalized = [self._normalize_rule(rule, source=rule.get("source", "llm")) for rule in rules]
+        self.cache.set(transaction_summary, normalized)
+        return normalized
 
     def _call_llm(self, transaction_summary: str) -> List[Dict]:
         prompt = self._build_prompt(transaction_summary)
@@ -241,10 +242,7 @@ Output ONLY a valid JSON array (no extra text):
             if start != -1 and end > start:
                 json_str = text[start: end + 1]
                 rules = json.loads(json_str)
-                if isinstance(rules, list) and all(
-                    isinstance(r, dict) and "rule" in r and "confidence" in r
-                    for r in rules
-                ):
+                if isinstance(rules, list) and all(isinstance(r, dict) and "rule" in r and "confidence" in r for r in rules):
                     return rules
         except (json.JSONDecodeError, ValueError, TypeError):
             pass
@@ -253,6 +251,48 @@ Output ONLY a valid JSON array (no extra text):
     @staticmethod
     def _fallback_rules(transaction_summary: str) -> List[Dict]:
         return list(DEFAULT_RULES)
+
+    @staticmethod
+    def _infer_rule_type(rule_text: str) -> str:
+        text = rule_text.lower()
+        if "circular" in text or "cycle" in text:
+            return "cycle"
+        if "layer" in text:
+            return "layering"
+        if "near_threshold" in text or "structuring" in text:
+            return "structuring"
+        if "freq" in text:
+            return "high_frequency"
+        if "rapid" in text:
+            return "rapid_transfer"
+        if "amount" in text:
+            return "large_amount"
+        return "generic"
+
+    @staticmethod
+    def _extract_thresholds(rule_text: str) -> Dict[str, float | bool]:
+        thresholds: Dict[str, float | bool] = {}
+        for raw_value in (10000, 20000, 50000, 100000):
+            if f"> {raw_value}" in rule_text or f">{raw_value}" in rule_text:
+                thresholds["amount_gt"] = float(raw_value)
+        if "near_threshold" in rule_text:
+            thresholds["near_threshold"] = True
+        if "freq > 5" in rule_text:
+            thresholds["freq_gt"] = 5.0
+        if "freq > 10" in rule_text:
+            thresholds["freq_gt"] = 10.0
+        return thresholds
+
+    @classmethod
+    def _normalize_rule(cls, rule: Dict, source: str = "llm") -> Dict:
+        rule_text = str(rule.get("rule", "")).strip()
+        return {
+            "rule": rule_text,
+            "confidence": float(rule.get("confidence", 0.5)),
+            "rule_type": rule.get("rule_type") or cls._infer_rule_type(rule_text),
+            "thresholds": rule.get("thresholds") or cls._extract_thresholds(rule_text),
+            "source": rule.get("source", source),
+        }
 
     def get_fallback_count(self) -> int:
         return self._fallback_count

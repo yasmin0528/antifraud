@@ -9,4 +9,5 @@ data:
   use_smote: true   # 从 default.yaml 继承，显式确认开启 SMOTE
   smote_ratio: 1.0
   batch_size: 32
+  window_size: 10
   num_workers: 0

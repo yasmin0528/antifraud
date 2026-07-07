@@ -1,15 +1,13 @@
 """
-CA3_AGM: 团伙记忆与模式补全模块（模拟CA3联想记忆）。
+CA3_AGM: explicit group-memory module for suspicious pattern retrieval.
 
-核心改进（v2）：
-1. 多记忆槽（num_groups ≥ 16）：每个槽位代表一种交易模式原型
-2. 可学习软分配：通过 MLP 将节点嵌入软分配到不同记忆槽
-3. 门控融合：可学习的 sigmoid 门控替代简单残差加法
-4. 可学习记忆：记忆槽通过梯度下降优化（不再手动动量更新）
-5. 可选 RPE 调制：多巴胺 RPE 信号调节记忆写入强度
+The module maintains one prototype per explicit group id and uses supervised
+prototype retrieval instead of free-form memory slots.
 """
 
-from typing import Optional
+from __future__ import annotations
+
+from typing import Dict, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -17,86 +15,174 @@ import torch.nn.functional as F
 
 
 class CA3_AGM(nn.Module):
-    """团伙记忆与模式补全：模拟CA3联想记忆（v2 重设计版）。"""
+    """Explicit group memory with learnable retrieval and gated fusion."""
 
     def __init__(
         self,
         emb_dim: int = 128,
         num_groups: int = 16,
         rpe_dim: int = 1,
+        memory_momentum: float = 0.9,
+        temperature: float = 0.2,
+        memory_mode: str = "explicit_group",
+        update_mode: str = "ema_group_proto",
     ):
         super().__init__()
         self.emb_dim = emb_dim
-        self.num_groups = num_groups
+        self.num_groups = max(int(num_groups), 1)
+        self.rpe_dim = rpe_dim
+        self.memory_momentum = memory_momentum
+        self.temperature = temperature
+        self.memory_mode = memory_mode
+        self.update_mode = update_mode
 
-        # ---- 可学习的记忆槽 ----
-        self.memory_bank = nn.Parameter(torch.randn(num_groups, emb_dim) * 0.1)
+        self.memory_bank = nn.Parameter(torch.randn(self.num_groups, emb_dim) * 0.02)
+        self.background_memory = nn.Parameter(torch.zeros(1, emb_dim))
 
-        # ---- 软分配网络：h → 各记忆槽的权重 ----
-        self.group_assigner = nn.Sequential(
-            nn.Linear(emb_dim + rpe_dim, num_groups),
-            nn.Tanh(),
-        )
-
-        # ---- 门控网络：决定从记忆中读取多少信息 ----
+        self.query_proj = nn.Linear(emb_dim + rpe_dim, emb_dim)
         self.gate_net = nn.Sequential(
             nn.Linear(emb_dim + rpe_dim, emb_dim),
             nn.Sigmoid(),
         )
-
-        # ---- 记忆读取后的变换 ----
         self.memory_proj = nn.Linear(emb_dim, emb_dim)
+        nn.init.xavier_uniform_(self.query_proj.weight)
         nn.init.xavier_uniform_(self.memory_proj.weight)
+
+        self._last_scores: Optional[torch.Tensor] = None
+        self._last_group_ids: Optional[torch.Tensor] = None
+        self._group_meta: Dict[int, Dict[str, object]] = {}
+
+    def _prepare_da(self, h: torch.Tensor, da_signal: Optional[torch.Tensor | float]) -> torch.Tensor:
+        if da_signal is None:
+            return torch.zeros((h.size(0), 1), device=h.device, dtype=h.dtype)
+        if isinstance(da_signal, (int, float)):
+            return torch.full((h.size(0), 1), float(da_signal), device=h.device, dtype=h.dtype)
+        da_signal = da_signal.to(device=h.device, dtype=h.dtype)
+        if da_signal.dim() == 0:
+            return da_signal.view(1, 1).expand(h.size(0), 1)
+        if da_signal.dim() == 1:
+            return da_signal.view(-1, 1)
+        return da_signal.view(h.size(0), 1)
 
     def forward(
         self,
         h: torch.Tensor,
-        group_ids: torch.Tensor = None,
-        da_signal: Optional[float] = None,
+        group_ids: Optional[torch.Tensor] = None,
+        da_signal: Optional[torch.Tensor | float] = None,
+        update_memory: bool = False,
     ) -> torch.Tensor:
         """
         Args:
-            h: [num_nodes, emb_dim] 节点嵌入
-            group_ids: [num_nodes] 团伙ID（未使用，保留兼容接口）
-            da_signal: float 或标量tensor, 全局多巴胺RPE信号（可选, 调节记忆强度）
-
-        Returns:
-            h_enhanced: [num_nodes, emb_dim] 增强后的节点嵌入
+            h: [N, D]
+            group_ids: [N], explicit group ids, -1 means background/unknown.
+            da_signal: global or per-sample neuromodulation signal.
+            update_memory: whether to update group prototypes with current batch.
         """
-        # ---- 构造调制信号 ----
-        # da_signal: 高 RPE → 更关注记忆读取（加大记忆影响）
-        # 使用全局标量（生物VTA多巴胺是全局调质，非per-neuron）
-        if da_signal is None:
-            da_signal = 0.0
-        if isinstance(da_signal, (int, float)):
-            da_signal = torch.full((h.size(0), 1), da_signal, device=h.device, dtype=h.dtype)
+        da = self._prepare_da(h, da_signal)
+        h_rpe = torch.cat([h, da], dim=-1)
+        query = F.normalize(self.query_proj(h_rpe), dim=-1)
+
+        memory_norm = F.normalize(self.memory_bank, dim=-1)
+        scores = query @ memory_norm.t()
+        assign_weights = F.softmax(scores / self.temperature, dim=-1)
+        retrieved = assign_weights @ self.memory_bank
+
+        if group_ids is not None:
+            group_ids = group_ids.to(h.device).long()
+            valid_mask = (group_ids >= 0) & (group_ids < self.num_groups)
+            if valid_mask.any():
+                explicit_memory = self.memory_bank[group_ids[valid_mask]]
+                retrieved = retrieved.clone()
+                retrieved[valid_mask] = explicit_memory
+            if (~valid_mask).any():
+                retrieved = retrieved.clone()
+                retrieved[~valid_mask] = self.background_memory.expand((~valid_mask).sum(), -1)
+            self._last_group_ids = group_ids.detach().cpu()
         else:
-            da_signal = da_signal.view(-1, 1)
+            self._last_group_ids = None
 
-        # 将 RPE 信号拼接到嵌入上用于分配和门控
-        h_rpe = torch.cat([h, da_signal], dim=-1)  # [N, emb_dim + 1]
-
-        # ---- 软分配：每个节点在各记忆槽上的分布 ----
-        assign_logits = self.group_assigner(h_rpe)   # [N, num_groups]
-        assign_weights = F.softmax(assign_logits, dim=-1)  # [N, num_groups]
-
-        # ---- 加权读取记忆 ----
-        # memory_out_i = sum_j assign_ij * memory_j
-        memory_out = assign_weights @ self.memory_bank  # [N, emb_dim]
-        memory_out = self.memory_proj(memory_out)        # [N, emb_dim]
-
-        # ---- 可学习门控融合 ----
-        gate = self.gate_net(h_rpe)  # [N, emb_dim], 值在 (0, 1)
+        gate = self.gate_net(h_rpe)
+        memory_out = self.memory_proj(retrieved)
         h_enhanced = h + gate * memory_out
+
+        self._last_scores = scores.detach().cpu()
+
+        if update_memory and group_ids is not None:
+            self.update_group_memory(h.detach(), group_ids)
 
         return h_enhanced
 
+    @torch.no_grad()
+    def update_group_memory(self, h: torch.Tensor, group_ids: torch.Tensor):
+        """Momentum-update explicit group prototypes from current batch."""
+        if group_ids is None:
+            return
+        group_ids = group_ids.to(h.device).long()
+        valid_mask = (group_ids >= 0) & (group_ids < self.num_groups)
+        if not valid_mask.any():
+            return
+
+        valid_h = h[valid_mask]
+        valid_groups = group_ids[valid_mask]
+        unique_groups = valid_groups.unique()
+
+        for gid in unique_groups.tolist():
+            member_mask = valid_groups == gid
+            proto = valid_h[member_mask].mean(dim=0)
+            if self.update_mode == "batch_mean":
+                self.memory_bank.data[gid] = proto
+            else:
+                self.memory_bank.data[gid] = (
+                    self.memory_momentum * self.memory_bank.data[gid]
+                    + (1.0 - self.memory_momentum) * proto
+                )
+            self._group_meta[int(gid)] = {
+                "group_id": int(gid),
+                "update_mode": self.update_mode,
+                "member_count": int(member_mask.sum().item()),
+                "memory_mode": self.memory_mode,
+            }
+
+    @torch.no_grad()
+    def update_group_memory_from_aggregates(self, group_repr: torch.Tensor, group_ids: torch.Tensor):
+        if group_repr is None or group_ids is None or group_repr.numel() == 0:
+            return
+        self.update_group_memory(group_repr, group_ids)
+
+    def memory_loss(self, h: torch.Tensor, group_ids: Optional[torch.Tensor]) -> torch.Tensor:
+        """Supervised prototype classification loss over valid explicit groups."""
+        if group_ids is None:
+            return torch.zeros((), device=h.device, dtype=h.dtype)
+
+        group_ids = group_ids.to(h.device).long()
+        valid_mask = (group_ids >= 0) & (group_ids < self.num_groups)
+        if not valid_mask.any():
+            return torch.zeros((), device=h.device, dtype=h.dtype)
+
+        query = F.normalize(h[valid_mask], dim=-1)
+        memory_norm = F.normalize(self.memory_bank, dim=-1)
+        logits = query @ memory_norm.t()
+        return F.cross_entropy(logits / self.temperature, group_ids[valid_mask])
+
+    def export_memory_state(self) -> Dict[str, torch.Tensor | int]:
+        return {
+            "num_groups": self.num_groups,
+            "memory_mode": self.memory_mode,
+            "update_mode": self.update_mode,
+            "memory_bank": self.memory_bank.detach().cpu(),
+            "background_memory": self.background_memory.detach().cpu(),
+            "last_scores": self._last_scores,
+            "last_group_ids": self._last_group_ids,
+        }
+
+    def export_group_meta(self) -> Dict[int, Dict[str, object]]:
+        return dict(self._group_meta)
+
     def get_memory_patterns(self) -> torch.Tensor:
-        """返回当前的记忆槽（用于可视化和分析）。"""
-        return self.memory_bank.data.clone()
+        return self.memory_bank.detach().cpu().clone()
 
     def get_assignment_weights(self, h: torch.Tensor) -> torch.Tensor:
-        """返回节点到记忆槽的软分配权重（用于可视化）。"""
-        h_rpe = torch.cat([h, torch.zeros(h.size(0), 1, device=h.device)], dim=-1)
-        assign_logits = self.group_assigner(h_rpe)
-        return F.softmax(assign_logits, dim=-1)
+        query = F.normalize(h, dim=-1)
+        memory_norm = F.normalize(self.memory_bank, dim=-1)
+        logits = query @ memory_norm.t()
+        return F.softmax(logits / self.temperature, dim=-1)

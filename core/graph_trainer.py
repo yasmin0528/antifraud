@@ -11,6 +11,8 @@ CryptopiaHacker 图级别节点分类训练器（增强版 V2）。
 
 from __future__ import annotations
 
+import csv
+import json
 import os
 import time
 from datetime import datetime
@@ -21,8 +23,10 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
+import yaml
 
 from core.aml_dataset import build_transaction_summary
+from core.aml_dataset import PREPROCESS_SCHEMA_VERSION
 from core.aml_dataset_cryptopia_graph import preprocess_cryptopia_graph
 from models import CA1_TTPM, CA3_AGM, MPFC
 from models.vta import compute_da_signal, compute_global_da_signal
@@ -33,6 +37,9 @@ from utils import (
     Logger,
     MetricTracker,
     Visualizer,
+    compute_alert_level_metrics,
+    compute_hit_at_k,
+    compute_subgraph_coverage,
     set_seed,
 )
 
@@ -49,7 +56,7 @@ class GraphNodeTrainer:
         self.resume_ckpt = getattr(cfg.experiment, "resume_ckpt", None)
 
         # 输出目录
-        exp_root = os.path.join(cfg.experiment.output_dir, cfg.experiment.name)
+        exp_root = os.path.join(cfg.experiment.output_dir, "cryptopia", cfg.experiment.name)
 
         if resume:
             if self.resume_ckpt:
@@ -93,11 +100,14 @@ class GraphNodeTrainer:
         self.patience_counter = 0
         self.global_step = 0
         self.epoch_losses: List[float] = []
+        self._ca3_update_memory = False
         # VTA: 缓存上一轮 da_signal 用于时序平滑
         self._prev_da: Optional[torch.Tensor] = None
+        self._last_edge_trace: List[Dict[str, object]] = []
         # 节点静态特征的归一化参数
         self._static_feat_mean: Optional[torch.Tensor] = None
         self._static_feat_std: Optional[torch.Tensor] = None
+        self._save_config_snapshot()
 
     @staticmethod
     def _find_latest_run_dir(exp_root: str) -> Optional[str]:
@@ -148,6 +158,41 @@ class GraphNodeTrainer:
         )
         self.logger.info("=" * 60)
 
+    def _save_config_snapshot(self):
+        config_path = os.path.join(self.output_dir, "config.yaml")
+        with open(config_path, "w", encoding="utf-8") as f:
+            yaml.safe_dump(self.cfg.to_dict(), f, allow_unicode=True, sort_keys=False)
+
+    def _save_metadata(self):
+        metadata = {
+            "dataset": "cryptopia",
+            "data_path": self.cfg.data.data_path,
+            "preprocessed_path": self.cfg.data.preprocessed_path,
+            "seed": self.cfg.experiment.seed,
+            "schema_version": self.graph_data.get("schema_version", PREPROCESS_SCHEMA_VERSION),
+            "split_unit": self.graph_data.get("split_unit", "graph_node"),
+            "n_nodes": self.n_nodes,
+            "n_edges": self.n_edges,
+            "n_groups": int(self.graph_data.get("n_groups", 0)),
+            "unknown_group_ratio": float(self.graph_data.get("unknown_group_ratio", 0.0)),
+            "train_size": int(self.graph_data["train_mask"].sum()),
+            "val_size": int(self.graph_data["val_mask"].sum()),
+            "test_size": int(self.graph_data["test_mask"].sum()),
+            "smote_applied": False,
+            "group_type": self.graph_data.get("group_type", "ml_transit_group"),
+            "memory_mode": self.cfg.model.ca3.memory_mode,
+            "eval_modes": {
+                "alert_metrics": self.cfg.eval.enable_alert_metrics,
+                "subgraph_metrics": self.cfg.eval.enable_subgraph_metrics,
+                "eval_da_mode": self.cfg.eval.eval_da_mode,
+                "vta_mode": self.cfg.vta.mode,
+                "global_da_mode": True,
+            },
+            "node_feature_schema": ["ca3_embedding", "node_static_feat", "score_micro"],
+        }
+        with open(os.path.join(self.results_dir, "metadata.json"), "w", encoding="utf-8") as f:
+            json.dump(metadata, f, ensure_ascii=False, indent=2)
+
     def _load_data(self):
         """加载或预处理图数据。"""
         cfg = self.cfg
@@ -160,20 +205,26 @@ class GraphNodeTrainer:
                 max_seq_len=cfg.data.window_size,
                 min_tx_per_addr=1,
                 save_path=data_path,
+                val_ratio=cfg.data.val_ratio,
+                test_ratio=cfg.data.test_ratio,
+                random_state=cfg.experiment.seed,
             )
         else:
             self.logger.info(f"Loading graph data from {data_path}...")
             self.graph_data = torch.load(data_path)
-            required = ["node_seq", "node_seq_len", "node_labels",
-                        "edge_index", "edge_attr", "node_static_feat",
-                        "train_mask", "val_mask", "test_mask"]
-            if not all(k in self.graph_data for k in required):
+            required = ["schema_version", "node_seq", "node_seq_len", "node_labels",
+                        "edge_index", "edge_attr", "edge_raw_amount", "node_static_feat",
+                        "train_mask", "val_mask", "test_mask", "group_ids"]
+            if self.graph_data.get("schema_version") != PREPROCESS_SCHEMA_VERSION or not all(k in self.graph_data for k in required):
                 self.logger.info("Graph data outdated, reprocessing...")
                 self.graph_data = preprocess_cryptopia_graph(
                     data_dir=cfg.data.data_path,
                     max_seq_len=cfg.data.window_size,
                     min_tx_per_addr=1,
                     save_path=data_path,
+                    val_ratio=cfg.data.val_ratio,
+                    test_ratio=cfg.data.test_ratio,
+                    random_state=cfg.experiment.seed,
                 )
 
         self.n_nodes = self.graph_data["node_labels"].size(0)
@@ -192,6 +243,7 @@ class GraphNodeTrainer:
             f"max_seq_len={self.graph_data['node_seq'].size(1)}, "
             f"feat_dim={self.graph_data['node_seq'].size(2)}"
         )
+        self._save_metadata()
 
     def _build_models(self):
         """构建 CA1 + CA3 + MPFC 模型。"""
@@ -209,11 +261,14 @@ class GraphNodeTrainer:
             self.logger.info(f"CA1 built (hidden={cfg.model.ca1.hidden_dim})")
 
         # CA3: 记忆增强
-        if "ca3" not in remove_modules and "vta" not in remove_modules:
+        if "ca3" not in remove_modules:
             ca3 = CA3_AGM(
                 emb_dim=cfg.model.ca3.emb_dim or cfg.model.hidden_dim,
-                num_groups=cfg.model.ca3.num_groups,
+                num_groups=max(int(self.graph_data.get("n_groups", 0)), 1),
                 rpe_dim=1,
+                memory_momentum=getattr(cfg.model.ca3, "memory_momentum", 0.9),
+                memory_mode=getattr(cfg.model.ca3, "memory_mode", "explicit_group"),
+                update_mode=getattr(cfg.model.ca3, "update_mode", "ema_group_proto"),
             ).to(self.device)
             self.models["ca3"] = ca3
             self.logger.info(f"CA3 built (emb_dim={cfg.model.ca3.emb_dim}, groups={ca3.num_groups})")
@@ -238,11 +293,15 @@ class GraphNodeTrainer:
                 dropout=cfg.model.dropout,
                 llm_config=llm_config,
                 use_llm=use_llm,
+                input_dim=cfg.model.mpfc.input_dim or (cfg.model.hidden_dim + int(self.graph_data["node_static_feat"].size(1)) + 1),
             ).to(self.device)
             mpfc.set_output_dir(self.output_dir)
             self.models["mpfc"] = mpfc
             llm_status = "with LLM" if use_llm else "without LLM (ablation)"
             self.logger.info(f"MPFC built ({llm_status}, layers={cfg.model.mpfc.gnn_layers})")
+        else:
+            static_dim = int(self.graph_data["node_static_feat"].size(1)) if "node_static_feat" in self.graph_data else 0
+            self.models["classifier"] = nn.Linear(cfg.model.hidden_dim + static_dim + 1, 1).to(self.device)
 
         # Optimizer
         params = []
@@ -272,6 +331,9 @@ class GraphNodeTrainer:
 
         node_seq = self.graph_data["node_seq"].to(self.device)           # [N, max_seq_len, 3]
         node_seq_len = self.graph_data["node_seq_len"].to(self.device)   # [N]
+        node_group_ids = self.graph_data.get("group_ids")
+        if node_group_ids is not None:
+            node_group_ids = node_group_ids.to(self.device)
 
         N = node_seq.size(0)
         batch_size = cfg.data.batch_size or 256
@@ -305,7 +367,13 @@ class GraphNodeTrainer:
                     batch_da = da_signal.unsqueeze(1).expand(B, 1)
                 else:
                     batch_da = da_signal[start:end]
-                h = self.models["ca3"](h, da_signal=batch_da)
+                batch_group_ids = node_group_ids[start:end] if node_group_ids is not None else None
+                h = self.models["ca3"](
+                    h,
+                    group_ids=batch_group_ids,
+                    da_signal=batch_da,
+                    update_memory=self._ca3_update_memory,
+                )
 
             embeddings[start:end] = h
             score_micros[start:end] = score_micro
@@ -350,6 +418,7 @@ class GraphNodeTrainer:
 
         for m in self.models.values():
             m.train()
+        self._ca3_update_memory = True
 
         # ---- 1. 对所有节点编码 ----
         # 第一个 epoch da_signal=1.0（无调制），之后从 VTA 计算
@@ -366,12 +435,17 @@ class GraphNodeTrainer:
         edge_attr = self.graph_data["edge_attr"].to(self.device)    # [E, 3]
         train_mask = self.graph_data["train_mask"].to(self.device)
         labels = self.graph_data["node_labels"].to(self.device)
+        group_ids = self.graph_data.get("group_ids")
+        if group_ids is not None:
+            group_ids = group_ids.to(self.device)
 
         # 交易摘要（用于 LLM）
         transaction_summary = getattr(self, '_transaction_summary', None)
         if transaction_summary is None and has_mpfc:
             try:
-                transaction_summary = build_transaction_summary(edge_attr, labels)
+                transaction_summary = build_transaction_summary(
+                    edge_attr, labels, raw_amounts=self.graph_data.get("edge_raw_amount")
+                )
                 self._transaction_summary = transaction_summary
             except Exception as e:
                 self.logger.warning(f"Failed to build transaction summary: {e}")
@@ -380,14 +454,16 @@ class GraphNodeTrainer:
         da_signal_tensor = float(da_signal_val)
 
         if has_mpfc:
-            node_out, logit, prob = self.models["mpfc"](
+            node_out, logit, prob, edge_trace = self.models["mpfc"](
                 node_x, edge_index, edge_attr,
                 transaction_summary=transaction_summary,
                 da_signal=da_signal_tensor,
             )
         else:
-            logit = nn.Linear(node_x.size(-1), 1, device=self.device)(node_x)
+            logit = self.models["classifier"](node_x)
             prob = torch.sigmoid(logit)
+            edge_trace = []
+        self._last_edge_trace = edge_trace
 
         pred_logit = logit.squeeze(-1)
         pred_prob = prob.squeeze(-1)
@@ -395,6 +471,7 @@ class GraphNodeTrainer:
         # ---- 4. 计算 DA 信号（VTA） ----
         da_signal_val = self._compute_da_signal(pred_prob, labels, train_mask)
         self._current_da = da_signal_val
+        self._prev_da = torch.tensor(da_signal_val)
 
         # ---- 5. Loss（只计算 train_mask） ----
         # 改进：使用更平衡的 focal loss 设置
@@ -425,6 +502,20 @@ class GraphNodeTrainer:
             loss = loss_fn(pred_logit[train_mask], labels[train_mask])
 
         # ---- 6. 反向传播 ----
+        if "ca3" in self.models and group_ids is not None:
+            valid_mask = group_ids >= 0
+            unique_groups = group_ids[valid_mask].unique(sorted=True) if valid_mask.any() else torch.zeros((0,), device=self.device, dtype=torch.long)
+            group_repr = []
+            for gid in unique_groups.tolist():
+                member_mask = group_ids == gid
+                group_repr.append(node_features[member_mask, :cfg.model.hidden_dim].mean(dim=0))
+            if group_repr:
+                group_repr_t = torch.stack(group_repr, dim=0)
+                self.models["ca3"].update_group_memory_from_aggregates(group_repr_t.detach(), unique_groups.detach())
+                memory_loss = self.models["ca3"].memory_loss(group_repr_t, unique_groups)
+            else:
+                memory_loss = torch.zeros((), device=self.device)
+            loss = loss + 0.1 * memory_loss
         self.optimizer.zero_grad()
         loss.backward()
         if cfg.train.grad_clip > 0:
@@ -459,6 +550,7 @@ class GraphNodeTrainer:
 
         for m in self.models.values():
             m.eval()
+        self._ca3_update_memory = False
 
         # 评估时不使用 da_signal（用恒等信号 1.0）
         node_features, score_micros = self._encode_all_nodes(
@@ -472,17 +564,75 @@ class GraphNodeTrainer:
         labels = self.graph_data["node_labels"].to(self.device)
 
         if has_mpfc:
-            _, logit, prob = self.models["mpfc"](node_x, edge_index, edge_attr, da_signal=1.0)
+            _, logit, prob, edge_trace = self.models["mpfc"](node_x, edge_index, edge_attr, da_signal=1.0)
         else:
-            logit = nn.Linear(node_x.size(-1), 1, device=self.device)(node_x)
+            logit = self.models["classifier"](node_x)
             prob = torch.sigmoid(logit)
+            edge_trace = []
+        self._last_edge_trace = edge_trace
 
         pred_prob = prob.squeeze(-1)[mask]
         y_true = labels[mask].cpu().numpy()
         y_prob = pred_prob.cpu().numpy()
-        y_pred = (y_prob >= threshold).astype(int)
+        metrics = ClassificationMetrics(y_true, y_prob, threshold).report()
+        group_ids_np = self.graph_data.get("group_ids")
+        if group_ids_np is not None:
+            group_ids_np = group_ids_np.cpu().numpy()[mask.cpu().numpy()]
+            metrics.update(
+                compute_alert_level_metrics(
+                    group_ids=group_ids_np,
+                    y_true=y_true,
+                    y_prob=y_prob,
+                    threshold=threshold,
+                    agg=self.cfg.eval.alert_agg,
+                )
+            )
+            metrics["hit_at_k"] = compute_hit_at_k(
+                group_ids=group_ids_np,
+                y_true=y_true,
+                y_prob=y_prob,
+                k=self.cfg.eval.hit_k,
+                agg=self.cfg.eval.alert_agg,
+            )
+            metrics.update(
+                compute_subgraph_coverage(
+                    true_group_ids=group_ids_np,
+                    pred_scores=y_prob,
+                    top_k=self.cfg.eval.hit_k,
+                )
+            )
+        return metrics
 
-        return ClassificationMetrics(y_true, y_prob, threshold).report()
+    @torch.no_grad()
+    def _collect_predictions(self, mask_key: str) -> Tuple[np.ndarray, np.ndarray, List[Dict[str, object]]]:
+        has_mpfc = "mpfc" in self.models
+
+        for m in self.models.values():
+            m.eval()
+        self._ca3_update_memory = False
+
+        node_features, score_micros = self._encode_all_nodes(
+            da_signal=torch.tensor(1.0, device=self.device)
+        )
+        node_x = torch.cat([node_features, score_micros], dim=-1)
+
+        edge_index = self.graph_data["edge_index"].to(self.device)
+        edge_attr = self.graph_data["edge_attr"].to(self.device)
+        mask = self.graph_data[mask_key].to(self.device)
+        labels = self.graph_data["node_labels"].to(self.device)
+
+        if has_mpfc:
+            _, logit, prob, edge_trace = self.models["mpfc"](node_x, edge_index, edge_attr, da_signal=1.0)
+        else:
+            logit = self.models["classifier"](node_x)
+            prob = torch.sigmoid(logit)
+            edge_trace = []
+
+        pred_prob = prob.squeeze(-1)[mask]
+        y_true = labels[mask].cpu().numpy()
+        y_prob = pred_prob.cpu().numpy()
+        self._last_edge_trace = edge_trace
+        return y_true, y_prob, edge_trace
 
     @torch.no_grad()
     def _search_best_threshold(self) -> Tuple[float, Dict]:
@@ -491,6 +641,7 @@ class GraphNodeTrainer:
 
         for m in self.models.values():
             m.eval()
+        self._ca3_update_memory = False
 
         node_features, score_micros = self._encode_all_nodes(
             da_signal=torch.tensor(1.0, device=self.device)
@@ -503,9 +654,9 @@ class GraphNodeTrainer:
         labels = self.graph_data["node_labels"].to(self.device)
 
         if has_mpfc:
-            _, logit, prob = self.models["mpfc"](node_x, edge_index, edge_attr, da_signal=1.0)
+            _, logit, prob, _ = self.models["mpfc"](node_x, edge_index, edge_attr, da_signal=1.0)
         else:
-            logit = nn.Linear(node_x.size(-1), 1, device=self.device)(node_x)
+            logit = self.models["classifier"](node_x)
             prob = torch.sigmoid(logit)
 
         pred_prob = prob.squeeze(-1)[val_mask]
@@ -593,7 +744,16 @@ class GraphNodeTrainer:
 
             state_dicts = {n: m.state_dict() for n, m in self.models.items()}
             self.ckpt_manager.save(
-                {"model_state_dict": state_dicts, "epoch": epoch, "global_step": self.global_step},
+                {
+                    "model_state_dict": state_dicts,
+                    "optimizer_state_dict": self.optimizer.state_dict() if self.optimizer else None,
+                    "epoch": epoch,
+                    "global_step": self.global_step,
+                    "best_val_f1": self.best_val_f1,
+                    "best_threshold": self.best_threshold,
+                    "patience_counter": self.patience_counter,
+                    "prev_da": self._prev_da.item() if isinstance(self._prev_da, torch.Tensor) else self._prev_da,
+                },
                 epoch=epoch, step=self.global_step,
             )
 
@@ -653,6 +813,8 @@ class GraphNodeTrainer:
             self.tb_logger.log_scalar(f"test/{k}", v, 0)
 
         self.tb_logger.close()
+        self._save_node_scores("test_mask")
+        self._save_ca3_artifacts()
 
         return {
             "best_val_f1": self.best_val_f1,
@@ -662,6 +824,11 @@ class GraphNodeTrainer:
             "test_metrics": test_metrics,
             "train_time": train_time,
             "results_dir": self.results_dir,
+            "dataset": "cryptopia",
+            "smote_applied": False,
+            "train_size": int(self.graph_data["train_mask"].sum()),
+            "val_size": int(self.graph_data["val_mask"].sum()),
+            "test_size": int(self.graph_data["test_mask"].sum()),
         }
 
     def test(self, checkpoint_path: Optional[str] = None) -> Dict:
@@ -685,9 +852,89 @@ class GraphNodeTrainer:
                         self.models[name].load_state_dict(state_dict)
 
         test_metrics = self._evaluate("test_mask")
+        self._save_node_scores("test_mask")
         self.logger.info(
             f"Test: ACC={test_metrics['acc']:.4f}, "
             f"F1={test_metrics['f1']:.4f}, "
             f"AUC={test_metrics.get('auc', 0):.4f}"
         )
         return test_metrics
+
+    def _save_ca3_artifacts(self):
+        if "ca3" not in self.models:
+            return
+        state = self.models["ca3"].export_memory_state()
+        torch.save(state, os.path.join(self.results_dir, "ca3_memory.pt"))
+        stats = {
+            "num_groups": int(state["num_groups"]),
+            "memory_shape": list(state["memory_bank"].shape),
+        }
+        with open(os.path.join(self.results_dir, "ca3_memory_stats.json"), "w", encoding="utf-8") as f:
+            json.dump(stats, f, ensure_ascii=False, indent=2)
+        with open(os.path.join(self.results_dir, "group_meta.json"), "w", encoding="utf-8") as f:
+            json.dump(self.models["ca3"].export_group_meta(), f, ensure_ascii=False, indent=2)
+
+    @staticmethod
+    def _aggregate_node_edge_trace(edge_trace: List[Dict[str, object]]) -> Dict[int, Dict[str, object]]:
+        node_to_edges: Dict[int, List[Dict[str, object]]] = {}
+        for row in edge_trace:
+            src = row.get("src")
+            dst = row.get("dst")
+            if src is None or dst is None:
+                continue
+            src = int(src)
+            dst = int(dst)
+            node_to_edges.setdefault(src, []).append(row)
+            if dst != src:
+                node_to_edges.setdefault(dst, []).append(row)
+
+        aggregated: Dict[int, Dict[str, object]] = {}
+        for node_idx, rows in node_to_edges.items():
+            if not rows:
+                continue
+            attention_values = [float(item.get("attention", 0.0) or 0.0) for item in rows]
+            top_row = max(rows, key=lambda item: float(item.get("attention", 0.0) or 0.0))
+            aggregated[node_idx] = {
+                "attention": float(sum(attention_values) / max(len(attention_values), 1)),
+                "matched_rule_text": str(top_row.get("matched_rule_text", "") or ""),
+                "matched_rule_type": str(top_row.get("matched_rule_type", "") or ""),
+                "rule_confidence": float(top_row.get("rule_confidence", 0.0) or 0.0),
+            }
+        return aggregated
+
+    def _save_node_scores(self, mask_key: str, filename: str = "node_scores.csv"):
+        y_true, y_prob, edge_trace = self._collect_predictions(mask_key)
+        mask = self.graph_data[mask_key].cpu().numpy().astype(bool)
+        node_indices = np.flatnonzero(mask)
+        group_ids = self.graph_data.get("group_ids")
+        if group_ids is not None:
+            group_ids = group_ids.cpu().numpy()
+        node_trace = self._aggregate_node_edge_trace(edge_trace)
+
+        path = os.path.join(self.results_dir, filename)
+        with open(path, "w", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            writer.writerow(["node_idx", "group_id", "label", "risk_score", "attention", "rule_text", "rule_type", "rule_confidence"])
+            for pos, node_idx in enumerate(node_indices):
+                group_id = int(group_ids[node_idx]) if group_ids is not None else -1
+                trace = node_trace.get(int(node_idx), {})
+                writer.writerow([
+                    int(node_idx),
+                    group_id,
+                    int(y_true[pos]),
+                    float(y_prob[pos]),
+                    float(trace.get("attention", 0.0)),
+                    str(trace.get("matched_rule_text", "")),
+                    str(trace.get("matched_rule_type", "")),
+                    float(trace.get("rule_confidence", 0.0)),
+                ])
+        self._save_edge_trace(edge_trace)
+
+    def _save_edge_trace(self, edge_trace: List[Dict[str, object]], filename: str = "edge_trace.csv"):
+        path = os.path.join(self.results_dir, filename)
+        with open(path, "w", newline="", encoding="utf-8") as f:
+            fieldnames = ["edge_id", "src", "dst", "attention", "rule_bias", "rule_match_score", "matched_rule_text", "matched_rule_type", "rule_confidence"]
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            for row in edge_trace:
+                writer.writerow({key: row.get(key, "") for key in fieldnames})

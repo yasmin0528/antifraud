@@ -1,25 +1,22 @@
-# CryptopiaHacker 图级别节点分类配置
-# 使用方式:
-#   python train.py --config configs/default.yaml --config configs/dataset/cryptopia_graph.yaml
+# Deprecated compatibility alias. Use cryptopia.yaml for formal experiments.
 data:
   dataset: "cryptopia_graph"
   data_path: "CryptopiaHacker"
-  preprocessed_path: "preprocessed_cryptopia_graph.pt"
+  preprocessed_path: "preprocessed_cryptopia.pt"
   regenerate: false
   val_ratio: 0.1
   test_ratio: 0.1
   use_smote: false
-  batch_size: 256                        # CA1 编码时的分批大小
-  window_size: 50                        # 每个地址的最大交易序列长度
+  batch_size: 256
+  window_size: 50
   num_workers: 0
 
 model:
   ca1:
-    feature_dim: 3                       # [amount, log_amount, time_diff]
+    feature_dim: 3
     hidden_dim: 128
-  edge_attr_dim: 3                       # [amount_norm, log_amount, rel_time_diff]
+  edge_attr_dim: 3
 
-  # 图节点分类场景 V2：使用更平衡的超参数
 train:
   pos_weight: 5.0
   focal_gamma: 2.0

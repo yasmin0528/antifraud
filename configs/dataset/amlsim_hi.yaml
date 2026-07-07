@@ -1,0 +1,12 @@
+data:
+  dataset: "amlsim_hi"
+  data_path: "AMLSIM"
+  preprocessed_path: "preprocessed_amlsim_hi.pt"
+  regenerate: false
+  val_ratio: 0.1
+  test_ratio: 0.1
+  use_smote: true
+  smote_ratio: 1.0
+  batch_size: 32
+  window_size: 10
+  num_workers: 0

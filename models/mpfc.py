@@ -51,12 +51,13 @@ class MPFC(nn.Module):
         dropout: float = 0.2,
         llm_config: Optional[Dict] = None,
         use_llm: bool = True,
+        input_dim: Optional[int] = None,
     ):
         super().__init__()
 
-        self.input_dim = emb_dim + 1  # CA3 emb_dim + CA1 score_micro (input also includes static_feat concatenated in _encode_all_nodes)
-        self.expected_input_dim = emb_dim + 1
-        self.input_proj = None  # lazily created when actual input dim differs
+        self.input_dim = input_dim if input_dim is not None else (emb_dim + 1)
+        self.expected_input_dim = self.input_dim
+        self.input_proj = nn.Identity()
         self.edge_attr_dim = edge_attr_dim
         self.hidden_dim = hidden_dim
         self.num_gnn_layers = num_gnn_layers
@@ -125,6 +126,7 @@ class MPFC(nn.Module):
         self._rule_update_counter = 0
         self._current_rules: Optional[List[Dict]] = None
         self._llm_interface = None
+        self._last_edge_trace: Optional[List[Dict[str, float | int | str]]] = None
 
     # ----------------------------------------------------------
     # LLM 接口懒加载（仅在 use_llm=True 时使用）
@@ -220,7 +222,7 @@ class MPFC(nn.Module):
         batch: Optional[torch.Tensor] = None,
         transaction_summary: Optional[str] = None,
         da_signal: Optional[torch.Tensor] = None,
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, List[Dict[str, float | int | str]]]:
         """
         完整前向传播（大模型.md Step 1 ~ 7）。
 
@@ -248,10 +250,22 @@ class MPFC(nn.Module):
         if self.use_llm:
             # LLM 符号规则生成（前额叶推理）
             self.update_rules(transaction_summary)
-            rule_bias = self.rule_encoder(edge_attr, self._current_rules)
+            rule_encoding = self.rule_encoder(edge_attr, self._current_rules)
         else:
             # MLP 规则偏置（消融实验：去除 LLM 后的效果）
-            rule_bias = self.rule_mlp(edge_attr).squeeze(-1)  # [E]
+            fallback_bias = self.rule_mlp(edge_attr).view(-1)
+            rule_encoding = {
+                "rule_bias": fallback_bias,
+                "rule_match_mask": torch.zeros(edge_attr.size(0), dtype=torch.bool, device=edge_attr.device),
+                "rule_match_score": torch.zeros(edge_attr.size(0), dtype=edge_attr.dtype, device=edge_attr.device),
+                "rule_trace_idx": torch.full((edge_attr.size(0),), -1, dtype=torch.long, device=edge_attr.device),
+                "matched_rule_confidence": torch.zeros(edge_attr.size(0), dtype=edge_attr.dtype, device=edge_attr.device),
+                "matched_rule_text": [""] * edge_attr.size(0),
+                "matched_rule_type": ["none"] * edge_attr.size(0),
+                "rules": [],
+                "available_rule_count": 0,
+            }
+        rule_bias = rule_encoding["rule_bias"]
 
         # ---- 多巴胺调制：RPE 信号在多个维度调控模型行为 ----
         # 类脑机制：VTA 多巴胺信号作为全局神经调质，同时影响：
@@ -265,17 +279,16 @@ class MPFC(nn.Module):
         da_temp_inv = 1.0
         if da_signal is not None:
             if isinstance(da_signal, (int, float)):
-                da_raw = da_signal  # scalar broadcast
+                da_raw = torch.full((edge_index.size(1),), float(da_signal), device=x.device, dtype=x.dtype)
             elif da_signal.numel() == 1:
-                da_raw = da_signal.item()
+                da_raw = torch.full((edge_index.size(1),), float(da_signal.item()), device=x.device, dtype=x.dtype)
             else:
                 src_nodes = edge_index[0]
-                da_raw = da_signal[src_nodes].squeeze(-1)
+                da_raw = da_signal[src_nodes].view(-1).to(device=x.device, dtype=x.dtype)
 
             # DA 信号映射到 4 个调控维度，每个维度的敏感度不同
             # 归一化 DA 到 [0, 1] 范围： (da - 1.0) / rpe_beta
-            da_norm = (da_raw - 1.0) / 1.5  # rpe_beta ≈ 1.5, 输出 [0, 1]
-            da_norm = max(0.0, min(1.0, da_norm))  # clamp
+            da_norm = torch.clamp((da_raw - 1.0) / 1.5, min=0.0, max=1.0)
 
             # 1. 注意力锐利度：da_scale ∈ [1.0, 2.5]
             # RPE=0 时 da_scale=1.0（正常），RPE=1 时 da_scale=~2.5（高度聚焦）
@@ -283,22 +296,19 @@ class MPFC(nn.Module):
 
             # 2. 任务门控锐利度：da_gate_sharp ∈ [1.0, 3.0]
             # sigmoid(x * gate_sharp) 在 x=0 附近更陡峭
-            da_gate_sharp = 1.0 + 2.0 * da_norm
+            da_gate_sharp = 1.0 + 2.0 * da_norm.mean().item()
 
             # 3. 消息强度增强：da_msg_boost ∈ [1.0, 1.3]
             # GNN 层间的消息传递强度微调
-            da_msg_boost = 1.0 + 0.3 * da_norm
+            da_msg_boost = 1.0 + 0.3 * da_norm.mean().item()
 
             # 4. 输出温度（逆温度）：da_temp_inv ∈ [0.8, 1.5]
             # 高 RPE → 逆温度 > 1 → 输出更极化（锐利决策）
             # 低 RPE → 逆温度 < 1 → 输出更平滑（保留不确定性）
-            da_temp_inv = 0.8 + 0.7 * da_norm
+            da_temp_inv = 0.8 + 0.7 * da_norm.mean().item()
 
         # ---- 输入维度投影（支持实际输入维度 != expected_input_dim） ----
-        if x.size(-1) != self.expected_input_dim:
-            if self.input_proj is None:
-                self.input_proj = nn.Linear(x.size(-1), self.expected_input_dim, device=x.device)
-            x = self.input_proj(x)
+        x = self.input_proj(x)
 
         # ---- Step 3 & 4: Layer-wise Rule-guided GNN 传播 ----
         for i in range(self.num_gnn_layers):
@@ -310,6 +320,12 @@ class MPFC(nn.Module):
             x_new = x_new * da_msg_boost
             x = F.relu(self.layer_norms[i](x_new + residual))
             x = self.dropout(x)
+
+        self._last_edge_trace = self._build_edge_trace(
+            edge_index=edge_index,
+            rule_encoding=rule_encoding,
+            attention_layers=self.get_attention_weights(),
+        )
 
         # ---- Step 5: Task-guided Gating ----
         # 目标驱动注意：强化与洗钱检测相关的节点，抑制无关节点
@@ -325,13 +341,13 @@ class MPFC(nn.Module):
             logit = self.score_mlp(graph_repr)
             # da_temp_inv: 逆温度调制输出锐利度
             prob = torch.sigmoid(logit * da_temp_inv)
-            return x, logit, prob
+            return x, logit, prob, self._last_edge_trace or []
 
         # ---- Step 7: 输出 ----
         logit = self.score_mlp(x)
         # da_temp_inv: 高 RPE → 输出更极化，低 RPE → 保留不确定性
         prob = torch.sigmoid(logit * da_temp_inv)
-        return x, logit, prob
+        return x, logit, prob, self._last_edge_trace or []
 
     def get_attention_weights(self) -> Optional[List[torch.Tensor]]:
         """收集所有 GNN 层的注意力权重用于可视化。"""
@@ -340,3 +356,48 @@ class MPFC(nn.Module):
             if hasattr(layer, "_last_attn") and layer._last_attn is not None:
                 weights.append(layer._last_attn)
         return weights if weights else None
+
+    def _build_edge_trace(
+        self,
+        edge_index: torch.Tensor,
+        rule_encoding: Dict[str, torch.Tensor | List[Dict]],
+        attention_layers: Optional[List[torch.Tensor]],
+    ) -> List[Dict[str, float | int | str]]:
+        if edge_index.numel() == 0:
+            return []
+        rules = rule_encoding.get("rules", []) or []
+        rule_bias = rule_encoding["rule_bias"].detach().cpu()
+        rule_match_score = rule_encoding["rule_match_score"].detach().cpu()
+        rule_trace_idx = rule_encoding["rule_trace_idx"].detach().cpu()
+        matched_rule_confidence = rule_encoding.get("matched_rule_confidence")
+        matched_rule_text = rule_encoding.get("matched_rule_text")
+        matched_rule_type = rule_encoding.get("matched_rule_type")
+        if isinstance(matched_rule_confidence, torch.Tensor):
+            matched_rule_confidence = matched_rule_confidence.detach().cpu()
+        src = edge_index[0].detach().cpu()
+        dst = edge_index[1].detach().cpu()
+        if attention_layers:
+            attention = attention_layers[-1].detach().cpu().mean(dim=-1)
+        else:
+            attention = torch.zeros(rule_bias.size(0))
+        trace: List[Dict[str, float | int | str]] = []
+        for edge_id in range(rule_bias.size(0)):
+            matched_idx = int(rule_trace_idx[edge_id])
+            matched_rule = rules[matched_idx] if 0 <= matched_idx < len(rules) else {}
+            trace.append(
+                {
+                    "edge_id": int(edge_id),
+                    "src": int(src[edge_id]),
+                    "dst": int(dst[edge_id]),
+                    "attention": float(attention[edge_id]),
+                    "rule_bias": float(rule_bias[edge_id]),
+                    "rule_match_score": float(rule_match_score[edge_id]),
+                    "matched_rule_text": str(matched_rule_text[edge_id] if isinstance(matched_rule_text, list) else matched_rule.get("rule", "")),
+                    "matched_rule_type": str(matched_rule_type[edge_id] if isinstance(matched_rule_type, list) else matched_rule.get("rule_type", "")),
+                    "rule_confidence": float(matched_rule_confidence[edge_id] if isinstance(matched_rule_confidence, torch.Tensor) else matched_rule.get("confidence", 0.0)),
+                }
+            )
+        return trace
+
+    def get_last_edge_trace(self) -> Optional[List[Dict[str, float | int | str]]]:
+        return self._last_edge_trace

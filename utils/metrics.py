@@ -4,7 +4,7 @@
 
 from __future__ import annotations
 
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -153,3 +153,88 @@ class MetricTracker:
         y_true = torch.cat(self._labels).numpy()
         y_prob = torch.cat(self._probs).numpy()
         return ClassificationMetrics.search_best_threshold(y_true, y_prob)
+
+
+def aggregate_group_scores(
+    group_ids: np.ndarray,
+    y_true: np.ndarray,
+    y_prob: np.ndarray,
+    agg: str = "max",
+) -> Tuple[np.ndarray, np.ndarray]:
+    group_ids = np.asarray(group_ids).ravel()
+    y_true = np.asarray(y_true).ravel()
+    y_prob = np.asarray(y_prob).ravel()
+
+    valid_mask = group_ids >= 0
+    if not valid_mask.any():
+        return np.array([], dtype=np.int64), np.array([], dtype=np.float32)
+
+    valid_groups = np.unique(group_ids[valid_mask])
+    agg_true: List[int] = []
+    agg_prob: List[float] = []
+    for gid in valid_groups:
+        mask = group_ids == gid
+        agg_true.append(int(y_true[mask].max()))
+        if agg == "mean":
+            agg_prob.append(float(y_prob[mask].mean()))
+        else:
+            agg_prob.append(float(y_prob[mask].max()))
+    return np.asarray(agg_true), np.asarray(agg_prob, dtype=np.float32)
+
+
+def compute_alert_level_metrics(
+    group_ids: np.ndarray,
+    y_true: np.ndarray,
+    y_prob: np.ndarray,
+    threshold: float = 0.5,
+    agg: str = "max",
+) -> Dict[str, float]:
+    agg_true, agg_prob = aggregate_group_scores(group_ids, y_true, y_prob, agg=agg)
+    if agg_true.size == 0:
+        return {"alert_level_ap": float("nan"), "alert_level_f1": float("nan")}
+    report = ClassificationMetrics(agg_true, agg_prob, threshold).report()
+    return {
+        "alert_level_ap": report["ap"],
+        "alert_level_f1": report["f1"],
+    }
+
+
+def compute_hit_at_k(
+    group_ids: np.ndarray,
+    y_true: np.ndarray,
+    y_prob: np.ndarray,
+    k: int = 10,
+    agg: str = "max",
+) -> float:
+    agg_true, agg_prob = aggregate_group_scores(group_ids, y_true, y_prob, agg=agg)
+    if agg_true.size == 0:
+        return float("nan")
+    order = np.argsort(-agg_prob)[: max(int(k), 1)]
+    return float(agg_true[order].mean()) if order.size > 0 else float("nan")
+
+
+def compute_subgraph_coverage(
+    true_group_ids: np.ndarray,
+    pred_scores: np.ndarray,
+    top_k: int = 10,
+) -> Dict[str, float]:
+    true_group_ids = np.asarray(true_group_ids).ravel()
+    pred_scores = np.asarray(pred_scores).ravel()
+    valid_mask = true_group_ids >= 0
+    if not valid_mask.any():
+        return {
+            "subgraph_coverage_node": float("nan"),
+            "subgraph_coverage_edge": float("nan"),
+        }
+
+    top_k = min(max(int(top_k), 1), pred_scores.size)
+    top_idx = np.argsort(-pred_scores)[:top_k]
+    pred_mask = np.zeros(pred_scores.size, dtype=bool)
+    pred_mask[top_idx] = True
+    overlap = float((pred_mask & valid_mask).sum())
+    denom = float(valid_mask.sum()) if valid_mask.sum() > 0 else float("nan")
+    coverage = overlap / denom if denom and not np.isnan(denom) else float("nan")
+    return {
+        "subgraph_coverage_node": coverage,
+        "subgraph_coverage_edge": coverage,
+    }

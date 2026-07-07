@@ -1,14 +1,10 @@
 """
-AML 数据集加载与预处理模块。
+AML dataset preprocessing and dataloader helpers.
 
-功能：
-- 从 CSV 加载原始交易数据
-- 特征工程（金额归一化、时间差、类型编码）
-- 滑动窗口序列构建
-- SMOTE 过采样
-- 数据分割（train/val/test）
-- Batch 图构建
-- 交易摘要生成（用于 LLM 规则生成）
+The tabular AML pipeline now uses account-level graph semantics:
+- samples remain transaction windows for supervision
+- graph nodes are accounts
+- splits are performed by sender account to avoid window leakage
 """
 
 from __future__ import annotations
@@ -31,39 +27,15 @@ except ImportError:
     _HAS_SMOTE = False
 
 
+PREPROCESS_SCHEMA_VERSION = 3
+
+
 def preprocess_data(
     csv_path: str,
     window_size: int = 10,
     save_path: Optional[str] = "preprocessed_data.pt",
     force_reprocess: bool = False,
 ) -> Dict:
-    """
-    完整数据预处理管线（不包含 SMOTE——SMOTE 仅对训练集执行）。
-
-    流程：
-    1. 读取 CSV
-    2. 排序、编码
-    3. 特征工程（金额归一化、时间差）
-    4. 滑动窗口序列构建
-    5. 保存为 .pt 文件
-
-    Args:
-        csv_path: 原始 CSV 路径
-        window_size: 滑动窗口大小
-        save_path: 保存路径（None 则不保存）
-        force_reprocess: 是否强制重新处理
-
-    Returns:
-        data: 包含以下 key 的字典
-            - sequences: [N, window_size, 3]
-            - labels: [N]
-            - sender_idx: [N]
-            - receiver_idx: [N]
-            - alert_idx: [N]
-            - edge_attr: [N, 2]
-            - detection_features: [N, 3]  原始特征（用于训练集SMOTE）
-            - n_types, n_accounts, n_groups
-    """
     df = pd.read_csv(csv_path)
     if df.columns[0].startswith("Unnamed"):
         df = df.drop(columns=[df.columns[0]])
@@ -71,11 +43,9 @@ def preprocess_data(
     df = df.sort_values(["SENDER_ACCOUNT_ID", "TIMESTAMP"]).reset_index(drop=True)
     df["IS_FRAUD"] = df["IS_FRAUD"].astype(int)
 
-    # 交易类型编码
     type_encoder = LabelEncoder()
     df["TX_TYPE_ID"] = type_encoder.fit_transform(df["TX_TYPE"])
 
-    # 账户编码
     all_accounts = pd.concat(
         [df["SENDER_ACCOUNT_ID"], df["RECEIVER_ACCOUNT_ID"]], ignore_index=True
     )
@@ -84,17 +54,12 @@ def preprocess_data(
     df["SENDER_IDX"] = account_encoder.transform(df["SENDER_ACCOUNT_ID"])
     df["RECEIVER_IDX"] = account_encoder.transform(df["RECEIVER_ACCOUNT_ID"])
 
-    # 特征工程 —— 金额归一化
-    # 注意：此处使用全局均值和标准差进行归一化（在训练/测试划分之前）。
-    # 这会导致测试集的统计信息轻微泄漏到训练集中。
-    # 在 AML 场景中，整个数据集分布已知是合理假设，且影响极小。
-    # 如需严格无泄漏，请在外部预先计算训练集的均值和标准差。
     df["TIME_DIFF"] = df.groupby("SENDER_ACCOUNT_ID")["TIMESTAMP"].diff().fillna(0)
-    amount_mean = df["TX_AMOUNT"].mean()
-    amount_std = df["TX_AMOUNT"].std() + 1e-6
+    amount_mean = float(df["TX_AMOUNT"].mean())
+    amount_std = float(df["TX_AMOUNT"].std() + 1e-6)
     df["TX_AMOUNT_NORM"] = (df["TX_AMOUNT"] - amount_mean) / amount_std
+    df["TX_LOG_AMOUNT"] = np.log1p(df["TX_AMOUNT"].clip(lower=0.0))
 
-    # Alert 编码
     alert_mask = df["ALERT_ID"] != -1
     df["ALERT_IDX"] = -1
     if alert_mask.any():
@@ -104,67 +69,107 @@ def preprocess_data(
         )
     df["ALERT_IDX"] = df["ALERT_IDX"].fillna(-1).astype(int)
 
-    n_types_orig = int(df["TX_TYPE_ID"].nunique())
+    n_types = int(df["TX_TYPE_ID"].nunique())
     n_accounts = int(account_encoder.classes_.shape[0])
-    n_groups_orig = int(df.loc[alert_mask, "ALERT_IDX"].nunique() if alert_mask.any() else 0)
+    n_groups = int(df.loc[alert_mask, "ALERT_IDX"].nunique() if alert_mask.any() else 0)
 
-    # 滑动窗口构建序列
     sequences = []
     sender_indices: list[int] = []
     receiver_indices: list[int] = []
     alert_indices: list[int] = []
     edge_attrs: list[list[float]] = []
     labels_list: list[int] = []
-    # 存储滑动窗口最后一步的原始特征，用于训练集 SMOTE
     detection_features_list: list[list[float]] = []
+    edge_raw_amounts: list[float] = []
+
+    account_sequences = np.zeros((n_accounts, window_size, 3), dtype=np.float32)
+    account_seq_len = np.zeros(n_accounts, dtype=np.int64)
+    account_alert_idx = np.full(n_accounts, -1, dtype=np.int64)
+    alert_to_accounts: Dict[int, list[int]] = {}
+    alert_to_samples: Dict[int, list[int]] = {}
 
     for _, group in df.groupby("SENDER_ACCOUNT_ID"):
         group = group.reset_index(drop=True)
+        sender_idx = int(group["SENDER_IDX"].iat[0])
+
+        sender_seq = group[["TX_AMOUNT_NORM", "TX_TYPE_ID", "TIME_DIFF"]].to_numpy(
+            dtype=np.float32
+        )
+        sender_recent = sender_seq[-window_size:]
+        account_seq_len[sender_idx] = len(sender_recent)
+        account_sequences[sender_idx, : len(sender_recent)] = sender_recent
+        valid_alerts = group.loc[group["ALERT_IDX"] >= 0, "ALERT_IDX"].astype(int).tolist()
+        if valid_alerts:
+            account_alert_idx[sender_idx] = int(valid_alerts[-1])
+            for alert_idx in sorted(set(valid_alerts)):
+                alert_to_accounts.setdefault(int(alert_idx), []).append(sender_idx)
+
         if len(group) < window_size:
             continue
+
         for i in range(len(group) - window_size + 1):
             window = group.iloc[i : i + window_size]
-            features = window[["TX_AMOUNT_NORM", "TX_TYPE_ID", "TIME_DIFF"]].to_numpy(dtype=np.float32)
+            features = window[["TX_AMOUNT_NORM", "TX_TYPE_ID", "TIME_DIFF"]].to_numpy(
+                dtype=np.float32
+            )
             sequences.append(features)
             labels_list.append(int(window["IS_FRAUD"].iat[-1]))
             sender_indices.append(int(window["SENDER_IDX"].iat[-1]))
             receiver_indices.append(int(window["RECEIVER_IDX"].iat[-1]))
             alert_indices.append(int(window["ALERT_IDX"].iat[-1]))
+            sample_idx = len(labels_list) - 1
+            if alert_indices[-1] >= 0:
+                alert_to_samples.setdefault(int(alert_indices[-1]), []).append(sample_idx)
             edge_attrs.append(
-                [float(window["TX_AMOUNT_NORM"].iat[-1]), float(window["TX_TYPE_ID"].iat[-1])]
+                [
+                    float(window["TX_AMOUNT_NORM"].iat[-1]),
+                    float(window["TX_LOG_AMOUNT"].iat[-1]),
+                    float(window["TIME_DIFF"].iat[-1]),
+                ]
             )
-            # 存储最后一步的原始 3 维特征，用于 SMOTE
+            edge_raw_amounts.append(float(window["TX_AMOUNT"].iat[-1]))
             last_row = window.iloc[-1]
-            detection_features_list.append([
-                float(last_row["TX_AMOUNT_NORM"]),
-                float(last_row["TX_TYPE_ID"]),
-                float(last_row["TIME_DIFF"]),
-            ])
+            detection_features_list.append(
+                [
+                    float(last_row["TX_AMOUNT_NORM"]),
+                    float(last_row["TX_TYPE_ID"]),
+                    float(last_row["TIME_DIFF"]),
+                ]
+            )
 
-    if len(sequences) == 0:
-        raise ValueError(
-            "No valid sequences were created. Reduce window_size or check dataset size."
-        )
-
-    sequences = np.stack(sequences, axis=0)
-    labels_arr = np.array(labels_list, dtype=np.int64)
-    sender_arr = np.array(sender_indices, dtype=np.int64)
-    receiver_arr = np.array(receiver_indices, dtype=np.int64)
-    alert_arr = np.array(alert_indices, dtype=np.int64)
-    edge_attr_arr = np.stack(edge_attrs, axis=0)
-    detection_features_arr = np.array(detection_features_list, dtype=np.float32)
+    if not sequences:
+        raise ValueError("No valid AML sequences created. Reduce window_size or inspect the dataset.")
 
     data = {
-        "sequences": torch.tensor(sequences, dtype=torch.float32),
-        "labels": torch.tensor(labels_arr, dtype=torch.float32),
-        "sender_idx": torch.tensor(sender_arr, dtype=torch.long),
-        "receiver_idx": torch.tensor(receiver_arr, dtype=torch.long),
-        "alert_idx": torch.tensor(alert_arr, dtype=torch.long),
-        "edge_attr": torch.tensor(edge_attr_arr, dtype=torch.float32),
-        "detection_features": torch.tensor(detection_features_arr, dtype=torch.float32),
-        "n_types": n_types_orig,
+        "schema_version": PREPROCESS_SCHEMA_VERSION,
+        "split_unit": "sender_account",
+        "group_type": "alert_id",
+        "edge_feature_names": ["amount_norm", "log_amount", "time_diff"],
+        "sample_group_ids": torch.tensor(np.array(sender_indices, dtype=np.int64), dtype=torch.long),
+        "split_group_ids": torch.tensor(np.array(sender_indices, dtype=np.int64), dtype=torch.long),
+        "group_ids": torch.tensor(np.array(alert_indices, dtype=np.int64), dtype=torch.long),
+        "memory_group_ids": torch.tensor(np.array(alert_indices, dtype=np.int64), dtype=torch.long),
+        "group_labels": torch.arange(max(n_groups, 0), dtype=torch.long),
+        "sequences": torch.tensor(np.stack(sequences, axis=0), dtype=torch.float32),
+        "labels": torch.tensor(np.array(labels_list, dtype=np.int64), dtype=torch.float32),
+        "sender_idx": torch.tensor(np.array(sender_indices, dtype=np.int64), dtype=torch.long),
+        "receiver_idx": torch.tensor(np.array(receiver_indices, dtype=np.int64), dtype=torch.long),
+        "alert_idx": torch.tensor(np.array(alert_indices, dtype=np.int64), dtype=torch.long),
+        "edge_attr": torch.tensor(np.stack(edge_attrs, axis=0), dtype=torch.float32),
+        "edge_raw_amount": torch.tensor(np.array(edge_raw_amounts, dtype=np.float32), dtype=torch.float32),
+        "detection_features": torch.tensor(np.array(detection_features_list, dtype=np.float32), dtype=torch.float32),
+        "account_sequences": torch.tensor(account_sequences, dtype=torch.float32),
+        "account_seq_len": torch.tensor(account_seq_len, dtype=torch.long),
+        "account_alert_idx": torch.tensor(account_alert_idx, dtype=torch.long),
+        "alert_to_accounts": {int(k): sorted(set(v)) for k, v in alert_to_accounts.items()},
+        "alert_to_samples": {int(k): sorted(set(v)) for k, v in alert_to_samples.items()},
+        "group_membership": {int(k): sorted(set(v)) for k, v in alert_to_samples.items()},
+        "amount_mean": amount_mean,
+        "amount_std": amount_std,
+        "n_types": n_types,
         "n_accounts": n_accounts,
-        "n_groups": n_groups_orig,
+        "n_groups": n_groups,
+        "smote_applied": False,
     }
 
     if save_path:
@@ -180,112 +185,93 @@ def apply_smote_to_train(
     smote_ratio: float = 1.0,
     random_state: int = 42,
 ) -> Tuple[Dict, np.ndarray]:
-    """
-    仅对训练集应用 SMOTE 过采样。
-
-    SMOTE 在滑动窗口后的特征空间生成合成样本。对于每个合成样本的序列：
-    - 最后一步特征 = SMOTE 生成的特征（同步到检测时刻）
-    - 前序步特征 = 从原始训练序列中随机采样对应位置的"背景"特征
-    - 保留 CA1 时序模型需要的时间变化信息（TX_AMOUNT_NORM 和 TIME_DIFF 的步间变化）
-
-    Args:
-        data: preprocess_data 的输出
-        train_idx: 训练集索引
-        smote_ratio: SMOTE 采样比例
-        random_state: 随机种子
-
-    Returns:
-        data: 在训练集中插入了 SMOTE 合成样本的新数据字典
-        train_idx: 扩展后的训练集索引（包含原始 + SMOTE 样本）
-    """
     if not _HAS_SMOTE:
         print("SMOTE requested but imblearn not available. Skipping SMOTE.")
         return data, train_idx
 
-    # 从 detection_features 中提取训练集样本的特征和标签用于 SMOTE
     detection_features = data["detection_features"].numpy()
     labels = data["labels"].numpy()
     sequences = data["sequences"].numpy()
 
     train_features = detection_features[train_idx]
     train_labels = labels[train_idx]
-    train_sequences = sequences[train_idx]  # [n_train, window_size, 3]
+    train_sequences = sequences[train_idx]
 
-    # 检查训练集是否有两类样本
-    unique_classes = np.unique(train_labels)
-    if len(unique_classes) < 2:
-        print(f"Warning: train set has only {len(unique_classes)} class, skipping SMOTE.")
+    if len(np.unique(train_labels)) < 2:
+        print("Warning: train set has only one class, skipping SMOTE.")
         return data, train_idx
 
-    print(f"Applying SMOTE on train set (ratio={smote_ratio})...")
     smote = SMOTE(sampling_strategy=smote_ratio, random_state=random_state)
     features_resampled, labels_resampled = smote.fit_resample(train_features, train_labels)
 
     n_original = len(train_idx)
     n_synthetic = len(features_resampled) - n_original
-
     if n_synthetic <= 0:
-        print("No synthetic samples generated by SMOTE.")
         return data, train_idx
 
-    print(f"SMOTE generated {n_synthetic} synthetic samples.")
-
-    # 为合成样本构建序列
-    window_size = data["sequences"].size(1)
-    synthetic_feats = features_resampled[n_original:]  # [n_synthetic, 3]
-
-    # 从原始训练序列中随机采样前序步特征（每个合成样本独立采样一条原始序列）
     rng = np.random.RandomState(random_state)
     donor_indices = rng.randint(0, len(train_idx), size=n_synthetic)
-    donor_sequences = train_sequences[donor_indices]  # [n_synthetic, window_size, 3]
+    donor_sequences = train_sequences[donor_indices]
 
-    # 替换最后一步为 SMOTE 生成的特征
     syn_sequences = donor_sequences.copy()
-    syn_sequences[:, -1, :] = synthetic_feats  # [n_synthetic, window_size, 3]
+    syn_sequences[:, -1, :] = features_resampled[n_original:]
     syn_labels = labels_resampled[n_original:]
     syn_sender = np.full(n_synthetic, -1, dtype=np.int64)
     syn_receiver = np.full(n_synthetic, -1, dtype=np.int64)
     syn_alert = np.full(n_synthetic, -1, dtype=np.int64)
-    syn_edge_attr = synthetic_feats[:, :2]  # [n_synthetic, 2]  amount + type
+    syn_edge_attr = np.stack(
+        [
+            features_resampled[n_original:, 0],
+            np.zeros(n_synthetic, dtype=np.float32),
+            features_resampled[n_original:, 2],
+        ],
+        axis=1,
+    ).astype(np.float32)
+    syn_raw_amount = np.zeros(n_synthetic, dtype=np.float32)
+    syn_split_group_ids = np.full(n_synthetic, -1, dtype=np.int64)
+    syn_group_ids = np.full(n_synthetic, -1, dtype=np.int64)
 
-    # 将合成样本拼接到原始数据末尾
-    data["sequences"] = torch.cat([
-        data["sequences"],
-        torch.tensor(syn_sequences, dtype=torch.float32),
-    ], dim=0)
-    data["labels"] = torch.cat([
-        data["labels"],
-        torch.tensor(syn_labels, dtype=torch.float32),
-    ], dim=0)
-    data["sender_idx"] = torch.cat([
-        data["sender_idx"],
-        torch.tensor(syn_sender, dtype=torch.long),
-    ], dim=0)
-    data["receiver_idx"] = torch.cat([
-        data["receiver_idx"],
-        torch.tensor(syn_receiver, dtype=torch.long),
-    ], dim=0)
-    data["alert_idx"] = torch.cat([
-        data["alert_idx"],
-        torch.tensor(syn_alert, dtype=torch.long),
-    ], dim=0)
-    data["edge_attr"] = torch.cat([
-        data["edge_attr"],
-        torch.tensor(syn_edge_attr, dtype=torch.float32),
-    ], dim=0)
-    data["detection_features"] = torch.cat([
-        data["detection_features"],
-        torch.tensor(synthetic_feats, dtype=torch.float32),
-    ], dim=0)
+    data["sequences"] = torch.cat(
+        [data["sequences"], torch.tensor(syn_sequences, dtype=torch.float32)], dim=0
+    )
+    data["labels"] = torch.cat(
+        [data["labels"], torch.tensor(syn_labels, dtype=torch.float32)], dim=0
+    )
+    data["sender_idx"] = torch.cat(
+        [data["sender_idx"], torch.tensor(syn_sender, dtype=torch.long)], dim=0
+    )
+    data["receiver_idx"] = torch.cat(
+        [data["receiver_idx"], torch.tensor(syn_receiver, dtype=torch.long)], dim=0
+    )
+    data["alert_idx"] = torch.cat(
+        [data["alert_idx"], torch.tensor(syn_alert, dtype=torch.long)], dim=0
+    )
+    data["edge_attr"] = torch.cat(
+        [data["edge_attr"], torch.tensor(syn_edge_attr, dtype=torch.float32)], dim=0
+    )
+    data["edge_raw_amount"] = torch.cat(
+        [data["edge_raw_amount"], torch.tensor(syn_raw_amount, dtype=torch.float32)], dim=0
+    )
+    data["detection_features"] = torch.cat(
+        [data["detection_features"], torch.tensor(features_resampled[n_original:], dtype=torch.float32)], dim=0
+    )
+    data["sample_group_ids"] = torch.cat(
+        [data["sample_group_ids"], torch.tensor(syn_split_group_ids, dtype=torch.long)], dim=0
+    )
+    if "split_group_ids" in data:
+        data["split_group_ids"] = torch.cat(
+            [data["split_group_ids"], torch.tensor(syn_split_group_ids, dtype=torch.long)], dim=0
+        )
+    if "group_ids" in data:
+        data["group_ids"] = torch.cat(
+            [data["group_ids"], torch.tensor(syn_group_ids, dtype=torch.long)], dim=0
+        )
+    data["smote_applied"] = True
+    data["original_train_size"] = int(n_original)
+    data["resampled_train_size"] = int(len(train_idx) + n_synthetic)
 
-    # 扩展训练集索引：原始训练集索引 + 新合成样本索引
-    new_indices = np.arange(len(data["labels"]))
-    synthetic_start = new_indices[-n_synthetic:]
+    synthetic_start = np.arange(len(data["labels"]))[-n_synthetic:]
     train_idx_ext = np.concatenate([train_idx, synthetic_start])
-
-    fraud_ratio = data["labels"][train_idx_ext].mean().item()
-    print(f"Train set after SMOTE: {len(train_idx_ext)} samples, fraud ratio={fraud_ratio:.3f}")
-
     return data, train_idx_ext
 
 
@@ -293,94 +279,73 @@ def build_batch_graph(
     sender_idx: torch.Tensor,
     receiver_idx: torch.Tensor,
     edge_attr: torch.Tensor,
-    node_features: torch.Tensor,
-    score_micro: torch.Tensor,
+    account_ids: torch.Tensor,
+    account_features: torch.Tensor,
+    account_scores: torch.Tensor,
+    fallback_features: Optional[torch.Tensor] = None,
+    fallback_scores: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """
-    从批次数据构建子图。
-
-    Args:
-        sender_idx: [batch_size] 发送方索引
-        receiver_idx: [batch_size] 接收方索引
-        edge_attr: [batch_size, edge_dim] 边特征
-        node_features: [batch_size, emb_dim] 节点特征
-        score_micro: [batch_size, 1] CA1 微观异常分数
-
-    Returns:
-        node_x: [num_nodes, emb_dim + 1] 聚合后的节点特征
-        edge_index: [2, num_edges] 重整后的边索引
-        edge_attr_batch: [num_edges, edge_dim] 边特征
-        sender_local: [batch_size] 发送方的本地节点索引
-    """
     device = sender_idx.device
-    batch_size = sender_idx.size(0)
+    feature_dim = account_features.size(-1)
+    score_dim = account_scores.size(-1)
 
-    # 找出有效节点（sender_idx >= 0，排除 SMOTE 样本）
-    valid_mask = sender_idx >= 0
-    has_invalid = (~valid_mask).any()
+    unique_valid = account_ids
+    base_nodes = unique_valid.tolist()
+    next_fake_id = (max(base_nodes) + 1) if base_nodes else 0
 
-    if has_invalid:
-        # SMOTE 样本的 sender_idx=-1: 自成孤点，不参与图结构
-        # 为它们分配新的唯一节点 ID
-        max_orig = sender_idx.max().item()
-        num_invalid = batch_size - valid_mask.sum().item()
-        fake_ids = torch.arange(max_orig + 1, max_orig + 1 + num_invalid, device=device)
-        sender_idx_fixed = sender_idx.clone()
-        sender_idx_fixed[~valid_mask] = fake_ids[:num_invalid]
-        receiver_idx_fixed = receiver_idx.clone()
-        receiver_idx_fixed[~valid_mask] = fake_ids[:num_invalid]
-    else:
-        sender_idx_fixed = sender_idx
-        receiver_idx_fixed = receiver_idx
+    sender_fixed = sender_idx.clone()
+    receiver_fixed = receiver_idx.clone()
+    fake_node_positions = []
 
-    unique_nodes = torch.unique(torch.cat([sender_idx_fixed, receiver_idx_fixed]))
-    max_idx = int(unique_nodes.max().item())
+    for idx in range(sender_idx.size(0)):
+        if sender_fixed[idx] < 0 or receiver_fixed[idx] < 0:
+            fake_id = next_fake_id
+            next_fake_id += 1
+            sender_fixed[idx] = fake_id
+            receiver_fixed[idx] = fake_id
+            fake_node_positions.append(idx)
+
+    unique_nodes = torch.unique(torch.cat([unique_valid, sender_fixed, receiver_fixed]))
+    max_idx = int(unique_nodes.max().item()) if unique_nodes.numel() > 0 else -1
     mapping = torch.full((max_idx + 1,), -1, dtype=torch.long, device=device)
     mapping[unique_nodes] = torch.arange(unique_nodes.size(0), device=device)
 
-    sender_local = mapping[sender_idx_fixed]
-    receiver_local = mapping[receiver_idx_fixed]
+    sender_local = mapping[sender_fixed]
+    receiver_local = mapping[receiver_fixed]
     edge_index = torch.stack([sender_local, receiver_local], dim=0)
 
-    combined = torch.cat([node_features, score_micro], dim=-1)
-    num_nodes = unique_nodes.size(0)
-    num_features = combined.size(-1)
-    node_x = torch.zeros((num_nodes, num_features), device=device)
-    counts = torch.zeros((num_nodes, 1), device=device)
+    node_x = torch.zeros((unique_nodes.size(0), feature_dim + score_dim), device=device)
+    if unique_valid.numel() > 0:
+        local_valid = mapping[unique_valid]
+        node_x[local_valid] = torch.cat([account_features, account_scores], dim=-1)
 
-    node_x.index_add_(0, sender_local, combined)
-    counts.index_add_(
-        0, sender_local, torch.ones((sender_local.size(0), 1), device=device)
-    )
-    node_x = node_x / counts.clamp(min=1.0)
+    if fake_node_positions and fallback_features is not None and fallback_scores is not None:
+        for sample_idx in fake_node_positions:
+            local_idx = sender_local[sample_idx]
+            node_x[local_idx] = torch.cat(
+                [fallback_features[sample_idx], fallback_scores[sample_idx]], dim=-1
+            )
 
     return node_x, edge_index, edge_attr, sender_local
 
 
 def build_transaction_summary(
     edge_attr: torch.Tensor,
-    labels: torch.Tensor,
+    labels: Optional[torch.Tensor],
+    raw_amounts: Optional[torch.Tensor] = None,
     max_samples: int = 1000,
 ) -> str:
-    """
-    从批次数据构建交易模式摘要（用于 LLM 规则生成）。
-
-    Args:
-        edge_attr: [batch_size, 2] 边特征（金额归一化值, 类型ID）
-        labels: [batch_size] 标签
-        max_samples: 最大采样数
-
-    Returns:
-        summary: 文本摘要
-    """
     if edge_attr.numel() == 0:
         return "Normal transaction patterns observed."
 
-    amounts = edge_attr[:, 0].cpu().numpy()
+    if raw_amounts is not None:
+        amounts = raw_amounts.detach().cpu().numpy()
+    elif edge_attr.size(-1) > 1:
+        amounts = torch.expm1(edge_attr[:, 1].detach().cpu()).numpy()
+    else:
+        amounts = edge_attr[:, 0].detach().cpu().numpy()
 
-    if len(amounts) > max_samples:
-        amounts = amounts[:max_samples]
-
+    amounts = amounts[:max_samples]
     summary_lines = [
         f"- Total transactions analyzed: {len(amounts)}",
         f"- Amount range: ${amounts.min():.2f} ~ ${amounts.max():.2f}",
@@ -390,54 +355,51 @@ def build_transaction_summary(
         f"- Transactions > $50,000: {(amounts > 50000).sum()} ({(amounts > 50000).mean() * 100:.1f}%)",
         f"- Transactions > $100,000: {(amounts > 100000).sum()} ({(amounts > 100000).mean() * 100:.1f}%)",
     ]
-
     if labels is not None:
-        label_arr = labels.cpu().numpy() if torch.is_tensor(labels) else labels
-        if len(label_arr) > max_samples:
-            label_arr = label_arr[:max_samples]
+        label_arr = labels.detach().cpu().numpy() if torch.is_tensor(labels) else labels
+        label_arr = label_arr[:max_samples]
         fraud_count = label_arr.sum()
         summary_lines.append(
-            f"- Fraudulent transactions: {fraud_count}/{len(label_arr)} "
-            f"({fraud_count / len(label_arr) * 100:.1f}%)"
+            f"- Fraudulent transactions: {fraud_count}/{len(label_arr)} ({fraud_count / len(label_arr) * 100:.1f}%)"
         )
-
     return "\n".join(summary_lines)
 
 
-def make_data_splits(
-    num_samples: int,
+def make_group_splits(
+    group_ids: np.ndarray,
     labels: np.ndarray,
     val_ratio: float = 0.1,
     test_ratio: float = 0.1,
     random_state: int = 42,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """
-    分层数据分割。
-
-    Returns:
-        train_idx, val_idx, test_idx
-    """
     if val_ratio + test_ratio >= 1.0:
         raise ValueError("val_ratio + test_ratio must be less than 1.0")
 
-    train_idx, temp_idx = train_test_split(
-        np.arange(num_samples),
+    valid_mask = group_ids >= 0
+    valid_groups = np.unique(group_ids[valid_mask])
+    group_labels = np.array([labels[group_ids == gid].max() for gid in valid_groups], dtype=np.int64)
+
+    train_groups, temp_groups = train_test_split(
+        valid_groups,
         test_size=val_ratio + test_ratio,
-        stratify=labels,
+        stratify=group_labels,
         random_state=random_state,
     )
-
     if test_ratio > 0:
+        temp_labels = np.array([labels[group_ids == gid].max() for gid in temp_groups], dtype=np.int64)
         relative_test = test_ratio / (val_ratio + test_ratio)
-        val_idx, test_idx = train_test_split(
-            temp_idx,
+        val_groups, test_groups = train_test_split(
+            temp_groups,
             test_size=relative_test,
-            stratify=labels[temp_idx],
+            stratify=temp_labels,
             random_state=random_state,
         )
     else:
-        val_idx, test_idx = temp_idx, np.array([], dtype=np.int64)
+        val_groups, test_groups = temp_groups, np.array([], dtype=np.int64)
 
+    train_idx = np.flatnonzero(np.isin(group_ids, train_groups) | (group_ids < 0))
+    val_idx = np.flatnonzero(np.isin(group_ids, val_groups))
+    test_idx = np.flatnonzero(np.isin(group_ids, test_groups))
     return train_idx, val_idx, test_idx
 
 
@@ -451,44 +413,26 @@ def get_dataloaders(
     random_state: int = 42,
     num_workers: int = 0,
 ) -> Tuple[DataLoader, Optional[DataLoader], Optional[DataLoader], Dict]:
-    """
-    从预处理数据创建 DataLoader。
-
-    Args:
-        data: preprocess_data 的输出
-        val_ratio: 验证集比例
-        test_ratio: 测试集比例
-        batch_size: 批次大小
-        use_smote: 是否在训练集上应用 SMOTE 过采样
-        smote_ratio: SMOTE 采样比例（1.0 = 使少数类与多数类数量相同）
-        random_state: 随机种子
-        num_workers: DataLoader workers
-
-    Returns:
-        train_loader, val_loader, test_loader, metadata
-    """
     sequences = data["sequences"]
     labels = data["labels"]
     sender_idx = data["sender_idx"]
     receiver_idx = data["receiver_idx"]
     alert_idx = data["alert_idx"]
     edge_attr = data["edge_attr"]
+    sample_group_ids = data.get("split_group_ids", data["sample_group_ids"])
 
-    num_samples = labels.size(0)
-    train_idx, val_idx, test_idx = make_data_splits(
-        num_samples,
-        labels.numpy(),
+    train_idx, val_idx, test_idx = make_group_splits(
+        sample_group_ids.numpy(),
+        labels.numpy().astype(np.int64),
         val_ratio=val_ratio,
         test_ratio=test_ratio,
         random_state=random_state,
     )
 
-    # ---- SMOTE 仅应用在训练集上 ----
     if use_smote:
         data, train_idx = apply_smote_to_train(
-            data, train_idx, smote_ratio=smote_ratio, random_state=random_state,
+            data, train_idx, smote_ratio=smote_ratio, random_state=random_state
         )
-        # 使用扩展后的数据重新取 tensor
         sequences = data["sequences"]
         labels = data["labels"]
         sender_idx = data["sender_idx"]
@@ -496,37 +440,46 @@ def get_dataloaders(
         alert_idx = data["alert_idx"]
         edge_attr = data["edge_attr"]
 
-    train_dataset = TensorDataset(
-        sequences, sender_idx, receiver_idx, edge_attr, alert_idx, labels
-    )
-    train_subset = torch.utils.data.Subset(train_dataset, train_idx)
-
+    dataset = TensorDataset(sequences, sender_idx, receiver_idx, edge_attr, alert_idx, labels)
     train_loader = DataLoader(
-        train_subset, batch_size=batch_size, shuffle=True, num_workers=num_workers
+        torch.utils.data.Subset(dataset, train_idx),
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=num_workers,
     )
 
     val_loader = None
     if len(val_idx) > 0:
-        val_dataset = torch.utils.data.Subset(train_dataset, val_idx)
         val_loader = DataLoader(
-            val_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers
+            torch.utils.data.Subset(dataset, val_idx),
+            batch_size=batch_size,
+            shuffle=False,
+            num_workers=num_workers,
         )
 
     test_loader = None
     if len(test_idx) > 0:
-        test_dataset = torch.utils.data.Subset(train_dataset, test_idx)
         test_loader = DataLoader(
-            test_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers
+            torch.utils.data.Subset(dataset, test_idx),
+            batch_size=batch_size,
+            shuffle=False,
+            num_workers=num_workers,
         )
 
     metadata = {
+        "schema_version": data.get("schema_version", 0),
+        "split_unit": data.get("split_unit", "sender_account"),
+        "group_type": data.get("group_type", "unknown"),
+        "edge_feature_names": data.get("edge_feature_names", []),
         "n_types": data.get("n_types", 0),
         "n_accounts": data.get("n_accounts", 0),
         "n_groups": data.get("n_groups", 0),
-        "num_samples": num_samples,
+        "num_samples": int(labels.size(0)),
         "train_size": len(train_idx),
         "val_size": len(val_idx),
         "test_size": len(test_idx),
+        "smote_applied": bool(data.get("smote_applied", False)),
+        "original_train_size": int(data.get("original_train_size", len(train_idx))),
+        "resampled_train_size": int(data.get("resampled_train_size", len(train_idx))),
     }
-
     return train_loader, val_loader, test_loader, metadata

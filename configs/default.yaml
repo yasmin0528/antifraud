@@ -13,7 +13,7 @@ experiment:
 # -------- 数据配置 --------
 data:
   dataset: "aml"
-  data_path: "/root/autodl-tmp/dataset.csv"
+  data_path: "dataset.csv"
   preprocessed_path: "preprocessed_data.pt"
   regenerate: false
   val_ratio: 0.1
@@ -21,6 +21,7 @@ data:
   use_smote: false
   smote_ratio: 1.0
   batch_size: 32
+  window_size: 10
   num_workers: 4            # Windows建议0, Linux可>0
 
 # -------- 模型配置 --------
@@ -29,7 +30,7 @@ model:
   hidden_dim: 128
   dim_type: 16
   dropout: 0.2
-  edge_attr_dim: 2
+  edge_attr_dim: 3
   task_dim: 128
 
   # CA1
@@ -42,11 +43,14 @@ model:
     emb_dim: 128
     num_groups: 16
     memory_momentum: 0.9
+    memory_mode: "explicit_group"
+    update_mode: "ema_group_proto"
 
   # MPFC (GNN)
   mpfc:
     gnn_layers: 2
     gnn_heads: 4
+    input_dim: null
 
   # LLM (mPFC 内置组件，模拟前额叶符号推理)
   llm:
@@ -69,6 +73,21 @@ train:
   patience: 5
   grad_clip: 1.0
   log_interval: 200        # 每N个batch打印日志
+
+eval:
+  enable_alert_metrics: true
+  enable_subgraph_metrics: true
+  alert_agg: "max"
+  hit_k: 10
+  eval_da_mode: "fixed_identity"
+
+explain:
+  export_attention: true
+  export_rule_trace: true
+
+vta:
+  mode: "batch_scalar"
+  target_modules: ["ca1", "ca3", "mpfc_rule", "mpfc_gate", "mpfc_output"]
 
 # -------- 消融配置 --------
 ablation:

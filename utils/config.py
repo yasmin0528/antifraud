@@ -56,13 +56,16 @@ class CA1Config:
 class CA3Config:
     emb_dim: int = 128
     num_groups: int = 16
-    memory_momentum: float = 0.9   # 保留兼容，新实现未使用
+    memory_momentum: float = 0.9
+    memory_mode: str = "explicit_group"
+    update_mode: str = "ema_group_proto"
 
 
 @dataclass
 class MPFCConfig:
     gnn_layers: int = 2
     gnn_heads: int = 4
+    input_dim: Optional[int] = None
 
 
 @dataclass
@@ -81,7 +84,7 @@ class ModelConfig:
     hidden_dim: int = 128
     dim_type: int = 16
     dropout: float = 0.2
-    edge_attr_dim: int = 2
+    edge_attr_dim: int = 3
     task_dim: int = 128
     ca1: CA1Config = field(default_factory=CA1Config)
     ca3: CA3Config = field(default_factory=CA3Config)
@@ -100,6 +103,29 @@ class TrainConfig:
     patience: int = 5
     grad_clip: float = 1.0
     log_interval: int = 200
+
+
+@dataclass
+class EvalConfig:
+    enable_alert_metrics: bool = True
+    enable_subgraph_metrics: bool = True
+    alert_agg: str = "max"
+    hit_k: int = 10
+    eval_da_mode: str = "fixed_identity"
+
+
+@dataclass
+class ExplainConfig:
+    export_attention: bool = True
+    export_rule_trace: bool = True
+
+
+@dataclass
+class VTAConfig:
+    mode: str = "batch_scalar"
+    target_modules: List[str] = field(
+        default_factory=lambda: ["ca1", "ca3", "mpfc_rule", "mpfc_gate", "mpfc_output"]
+    )
 
 
 @dataclass
@@ -168,6 +194,9 @@ class Config:
     data: DataConfig = field(default_factory=DataConfig)
     model: ModelConfig = field(default_factory=ModelConfig)
     train: TrainConfig = field(default_factory=TrainConfig)
+    eval: EvalConfig = field(default_factory=EvalConfig)
+    explain: ExplainConfig = field(default_factory=ExplainConfig)
+    vta: VTAConfig = field(default_factory=VTAConfig)
     ablation: AblationConfig = field(default_factory=AblationConfig)
     sweep: SweepConfig = field(default_factory=SweepConfig)
     multi_seed: MultiSeedConfig = field(default_factory=MultiSeedConfig)
@@ -188,6 +217,12 @@ class Config:
             self.model = ModelConfig(**model_dict)
         if isinstance(self.train, dict):
             self.train = TrainConfig(**self.train)
+        if isinstance(self.eval, dict):
+            self.eval = EvalConfig(**self.eval)
+        if isinstance(self.explain, dict):
+            self.explain = ExplainConfig(**self.explain)
+        if isinstance(self.vta, dict):
+            self.vta = VTAConfig(**self.vta)
         if isinstance(self.ablation, dict):
             self.ablation = AblationConfig(**self.ablation)
         if isinstance(self.sweep, dict):

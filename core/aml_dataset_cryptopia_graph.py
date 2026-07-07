@@ -25,6 +25,8 @@ import pandas as pd
 import torch
 from sklearn.model_selection import train_test_split
 
+from core.aml_dataset import PREPROCESS_SCHEMA_VERSION
+
 
 def _compute_pagerank(edge_index: np.ndarray, n_nodes: int, alpha: float = 0.85, max_iter: int = 30) -> np.ndarray:
     """计算 PageRank 值（幂迭代法）。"""
@@ -86,7 +88,10 @@ def preprocess_cryptopia_graph(
     data_dir: str,
     max_seq_len: int = 50,
     min_tx_per_addr: int = 1,
-    save_path: Optional[str] = "preprocessed_cryptopia_graph.pt",
+    save_path: Optional[str] = "preprocessed_cryptopia.pt",
+    val_ratio: float = 0.1,
+    test_ratio: float = 0.1,
+    random_state: int = 42,
 ) -> Dict:
     """
     CryptopiaHacker 图级别预处理（增强版 V2）。
@@ -112,6 +117,14 @@ def preprocess_cryptopia_graph(
 
     labels_array = np.zeros(n_accounts, dtype=np.int64)
     labels_array[(address_df["label"] == "heist").values] = 1
+    raw_group_names = address_df["name_tag"].fillna("background").astype(str).values
+    explicit_group_names = sorted(
+        {name for name in raw_group_names if name.startswith("ml_transit_")}
+    )
+    group_name_to_id = {name: idx for idx, name in enumerate(explicit_group_names)}
+    group_ids_array = np.array(
+        [group_name_to_id.get(name, -1) for name in raw_group_names], dtype=np.int64
+    )
     print(f"Addresses: total={n_accounts}, heist={labels_array.sum()}")
 
     # ---- 2. 加载并融合多 cube 交易数据 ----
@@ -172,18 +185,23 @@ def preprocess_cryptopia_graph(
     print(f"Valid nodes (≥{min_tx_per_addr} tx): {len(valid_nodes)}")
 
     valid_labels = labels_array[valid_nodes]
+    valid_group_ids = group_ids_array[valid_nodes]
+    group_to_nodes: Dict[int, List[int]] = {}
     print(f"  heist: {valid_labels.sum()}, normal: {len(valid_nodes)-valid_labels.sum()}")
 
     N = len(valid_nodes)
     node_seq = torch.zeros(N, max_seq_len, 3, dtype=torch.float32)
     node_seq_len = torch.zeros(N, dtype=torch.long)
     node_labels = torch.tensor(valid_labels, dtype=torch.float32)
+    node_group_ids = torch.tensor(valid_group_ids, dtype=torch.long)
     orig_to_new = {o: n for n, o in enumerate(valid_nodes)}
 
     for new_i, orig_i in enumerate(valid_nodes):
         seq = node_seqs[orig_i]
         n_tx = min(len(seq), max_seq_len)
         node_seq_len[new_i] = n_tx
+        if valid_group_ids[new_i] >= 0:
+            group_to_nodes.setdefault(int(valid_group_ids[new_i]), []).append(int(new_i))
         recent = seq[-max_seq_len:]
         for t, vals in enumerate(recent):
             node_seq[new_i, t, 0] = vals[0]  # amount_norm
@@ -282,8 +300,24 @@ def preprocess_cryptopia_graph(
     all_idx = np.arange(N)
     labels_np = node_labels.numpy().astype(int)
 
-    trn, tmp = train_test_split(all_idx, test_size=0.2, stratify=labels_np, random_state=42)
-    val, tst = train_test_split(tmp, test_size=0.5, stratify=labels_np[tmp], random_state=42)
+    if val_ratio + test_ratio >= 1.0:
+        raise ValueError("val_ratio + test_ratio must be less than 1.0")
+    trn, tmp = train_test_split(
+        all_idx,
+        test_size=val_ratio + test_ratio,
+        stratify=labels_np,
+        random_state=random_state,
+    )
+    relative_test = test_ratio / (val_ratio + test_ratio) if test_ratio > 0 else 0.0
+    if test_ratio > 0:
+        val, tst = train_test_split(
+            tmp,
+            test_size=relative_test,
+            stratify=labels_np[tmp],
+            random_state=random_state,
+        )
+    else:
+        val, tst = tmp, np.array([], dtype=np.int64)
 
     train_mask = torch.zeros(N, dtype=torch.bool); train_mask[trn] = True
     val_mask = torch.zeros(N, dtype=torch.bool);   val_mask[val] = True
@@ -295,16 +329,30 @@ def preprocess_cryptopia_graph(
     print(f"  Test heist:  {labels_np[tst].mean():.4f}")
 
     data = {
+        "schema_version": PREPROCESS_SCHEMA_VERSION,
+        "split_unit": "graph_node",
+        "group_type": "ml_transit_group",
+        "edge_feature_names": ["amount_norm", "log_amount", "time_diff"],
+        "group_ids": node_group_ids,
+        "memory_group_ids": node_group_ids.clone(),
+        "group_labels": torch.tensor(valid_labels, dtype=torch.long),
         "node_seq": node_seq,                    # [N, max_seq_len, 3]
         "node_seq_len": node_seq_len,            # [N]
         "node_labels": node_labels,              # [N]
         "node_static_feat": node_static_feat,    # [N, 10] static features
         "edge_index": edge_index,                # [2, E]
         "edge_attr": edge_attr,                  # [E, 3]
+        "edge_raw_amount": edge_raw_amount,
         "train_mask": train_mask,
         "val_mask": val_mask,
         "test_mask": test_mask,
         "n_accounts": N,
+        "n_groups": len(explicit_group_names),
+        "group_name_to_id": group_name_to_id,
+        "group_id_to_name": {int(v): k for k, v in group_name_to_id.items()},
+        "group_to_nodes": {int(k): sorted(set(v)) for k, v in group_to_nodes.items()},
+        "group_membership": {int(k): sorted(set(v)) for k, v in group_to_nodes.items()},
+        "unknown_group_ratio": float((valid_group_ids < 0).mean()) if len(valid_group_ids) > 0 else 0.0,
         "orig_to_new": orig_to_new,
         "amount_mean": float(amount_mean),       # for rule encoder
         "amount_std": float(amount_std),         # for rule encoder

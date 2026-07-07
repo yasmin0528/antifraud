@@ -1,287 +1,409 @@
-# AML 反洗钱检测模型
+# AML Anti-Money Laundering Project
 
-基于海马-前额叶环路（CA1 ⟶ CA3 ⟶ mPFC ⟶ VTA）的图神经网络反洗钱交易检测模型。
+本项目当前的正式实验实现统一为 `CA1 -> CA3 -> MPFC -> VTA`。
+代码已经支持四个正式数据入口：
 
-## 环境配置
+- `aml`
+- `cryptopia`
+- `amlsim_hi`
+- `amlsim_li`
 
-依赖包较多，建议拆分为两个 conda 环境，避免 vLLM、xformers、PyTorch Geometric 冲突：
+其中：
+
+- `aml` 和 `amlsim_*` 走 sample-level 管线，监督单元是交易窗口样本。
+- `cryptopia` 走 graph node-level 管线，监督单元是地址节点。
+- `cryptopia_graph` 只保留兼容含义，不应再作为论文中的正式数据集名称。
+
+## 1. Current Implementation Status
+
+当前代码已经落地的能力：
+
+- `CA1` 负责账户/节点局部时序编码，输出 embedding 与 `score_micro`。
+- `CA3` 已升级为显式 group memory 版本，支持按 `ALERT_ID`、`pattern_instance_id` 或 `ml_transit_*` group 进行聚合更新。
+- `MPFC` 已支持 rule-guided GAT、task gating、LLM 规则导入、边级 rule trace 导出。
+- `VTA` 已支持训练期 `da_signal` 调制，但仍属于轻量 neuromodulation，不是严格反馈控制器。
+- 已支持 group-level 评估指标：`alert_level_ap`、`alert_level_f1`、`hit_at_k`、`subgraph_coverage_*`。
+- 已支持可视化脚本读取 `score_file + edge_trace.csv` 进行子图对比分析。
+
+当前仍然属于“已实现第一版、但不是最终论文完结版”的部分：
+
+- `CA3` 虽然已经使用显式 group 元信息更新 memory，但还不是完整的跨案件案例库检索系统。
+- `graph node` 任务的解释本质上仍然来自边级证据，再聚合为节点摘要，不应表述成“原生节点解释器”。
+- `LLM` 当前承担“规则生成器”角色，不应表述成严格可验证的符号推理器。
+
+## 2. Dataset Mapping
+
+### `aml`
+
+- 原始数据：`AMLdataset.csv`
+- 监督单元：sample-level 交易窗口
+- split 单元：`SENDER_ACCOUNT_ID`
+- 显式 group：`ALERT_ID`
+- 适合验证：全链路时序 + 账户图 + 告警级评估
+
+### `cryptopia`
+
+- 原始数据：`CryptopiaHacker/`
+- 监督单元：graph node-level 地址节点
+- split 单元：`train_mask / val_mask / test_mask`
+- 显式 group：地址标签中的 `ml_transit_*`
+- 适合验证：图结构传播、黑产地址识别、子图恢复
+
+### `amlsim_hi`
+
+- 原始数据：
+  - `AMLSIM/HI-Small_Trans.csv`
+  - `AMLSIM/HI-Small_accounts.csv`
+  - `AMLSIM/HI-Small_Patterns.txt`
+- 监督单元：sample-level 交易窗口
+- 显式 group：从 `Patterns.txt` 解析出的 `pattern_instance_id`
+- 适合验证：pattern/group 结构迁移
+
+### `amlsim_li`
+
+- 原始数据：
+  - `AMLSIM/LI-Small_Trans.csv`
+  - `AMLSIM/LI-Small_accounts.csv`
+  - `AMLSIM/LI-Small_Patterns.txt`
+- 监督单元：sample-level 交易窗口
+- 显式 group：从 `Patterns.txt` 解析出的 `pattern_instance_id`
+- 适合验证：低复杂度 pattern 数据上的稳定性
+
+## 3. Explainability Modes
+
+这是当前文档必须明确区分的部分。
+
+### Sample-Level Explainability
+
+适用数据集：
+
+- `aml`
+- `amlsim_hi`
+- `amlsim_li`
+
+预测对象：
+
+- 一条 `sample`，即一个交易滑窗样本
+
+导出文件：
+
+- `results/sample_scores.csv`
+- `results/edge_trace.csv`
+
+解释语义：
+
+- `sample_scores.csv` 中每一行对应一个样本。
+- 当前 sample-level 管线中，“样本”和“批图中的一条边”是一一对应的，因此可以把边级解释直接回填到样本行。
+- 这里的 `attention / rule_text / rule_type / rule_confidence` 可以被解释为该样本对应交易边的直接证据。
+
+适合写进论文的表述：
+
+> 在 sample-level 数据集上，模型对每个交易窗口样本输出风险分数，并同时导出该样本对应交易边的注意力与匹配规则，形成直接样本级解释。
+
+### Graph Node Explainability
+
+适用数据集：
+
+- `cryptopia`
+
+预测对象：
+
+- 一个地址节点 `node`
+
+导出文件：
+
+- `results/node_scores.csv`
+- `results/edge_trace.csv`
+
+解释语义：
+
+- `node_scores.csv` 中每一行对应一个节点预测结果。
+- 但 `MPFC` 的原生解释信号仍然产生在边上，因此 `node_scores.csv` 里的解释字段是由该节点 incident edges 聚合得到的摘要：
+  - `attention`：邻接边 attention 的聚合值
+  - `rule_text / rule_type / rule_confidence`：最高注意力边对应的规则摘要
+- 如果需要严格证据链，应以 `edge_trace.csv` 为准，而不是把 `node_scores.csv` 当成逐节点原生规则证明。
+
+适合写进论文的表述：
+
+> 在 graph node-level 数据集上，模型首先产生边级结构解释，再将邻接边证据聚合为节点级摘要；因此节点解释属于“边证据聚合后的节点摘要”，而非独立生成的原生节点解释。
+
+### Practical Recommendation
+
+如果你在写实验报告或论文：
+
+- `aml / amlsim_*`：可以写“sample-level direct explanation”
+- `cryptopia`：应写“edge-grounded node summary explanation”
+
+不要混写成统一的“instance-level explanation”，否则语义不严谨。
+
+## 4. Environment
+
+建议拆分为两个环境：
 
 ```bash
 conda create -n llm python=3.10 -y
 conda create -n antifraud python=3.10 -y
 
-# LLM 环境（仅运行 LLM 服务用）
 conda activate llm
 pip install -r requirements_llm.txt
 
-# 模型环境（训练和推理）
 conda activate antifraud
 pip install -r requirements_antifraud.txt
 ```
 
-项目根目录下操作：
+## 5. Common Commands
+
+默认在 `refactored/` 目录下运行。
+
+### Single Run
 
 ```bash
-cd /path/to/antifraud
-
-# 确保 train.py 有执行权限
-chmod +x train.py
+python train.py --config configs/default.yaml --dataset aml
+python train.py --config configs/dataset/cryptopia.yaml
+python train.py --config configs/dataset/amlsim_hi.yaml
+python train.py --config configs/dataset/amlsim_li.yaml
 ```
 
-## 目录结构
-
-```
-.
-├── train.py                          # 统一训练入口
-├── scripts/
-│   ├── run_experiments.py            # 实验编排器（批量运行各类实验）
-│   └── view_llm_rules.py             # 查看 LLM 生成的规则
-├── core/                             # 核心模块（数据集、训练器、编排器）
-├── configs/
-│   ├── default.yaml                  # 默认配置（完整模型）
-│   ├── ablation/                     # 消融实验配置（wo_*）
-│   ├── sensitivity/                  # 参数敏感性配置
-│   └── vta_decomposition.yaml        # VTA 损失解耦配置
-├── models/                           # 模型组件
-└── utils/                            # 工具（日志/checkpoint/可视化）
-```
-
-## 实验清单
-
-| 实验类型 | 说明 | 子实验数 | 预计总时长 |
-|----------|------|----------|-----------|
-| baseline | 完整 MPFC 模型 | 1 | ~30min |
-| ablation | 逐模块消融（CA1/CA3/MPFC/VTA/LLM） | 5 | 1h+1.5h+4.5h |
-| sensitivity | 参数敏感性（lr/focal_gamma/rpe_beta/memory_momentum） | 4 | ~2h |
-| vta_decomp | VTA 损失解耦（Focal/RPE/PW 逐组件清零） | 5 | ~2.5h |
-| multi_seed | 多随机种子稳定性评估（5 seeds） | 5 | ~2.5h |
-
-> 以上时长按 `--epochs 10`、单 GPU 估计。
-
-## 通用参数
-
-所有实验共用以下参数：
-
-| 参数 | 说明 | 必需 |
-|------|------|------|
-| `--llm_api_url <URL>` | LLM API 端点 | 需要 LLM 的实验必填 |
-| `--data_path <PATH>` | 数据集 CSV 路径 | 需要数据的实验必填 |
-| `--preprocessed_path <PATH>` | 预处理数据路径（可选） | 否 |
-| `--epochs <N>` | 训练轮数（默认 10） | 否 |
-| `--output_dir <DIR>` | 输出目录（默认 outputs/） | 否 |
-
----
-
-## 一、主实验（Baseline）
-
-运行完整 MPFC 模型（含 LLM 规则生成）：
+### Ablation
 
 ```bash
-# 方式一：直接通过 train.py 运行
-python train.py \
-    --config configs/default.yaml \
-    --llm_api_url http://127.0.0.1:23333/v1/chat/completions \
-    --name baseline \
-    --epochs 10
+python train.py --config configs/ablation/wo_ca3.yaml --dataset aml
+python train.py --config configs/ablation/wo_vta.yaml --config configs/dataset/cryptopia.yaml
 ```
 
-输出目录：`outputs/baseline/run_YYYYMMDD_HHMMSS/`
-
-### 断点续训
+### Batch Experiments
 
 ```bash
-# 自动恢复 outputs/baseline/ 下最新的 run_* 目录
-python train.py --resume
-
-# 指定 checkpoint 恢复
-python train.py --resume outputs/baseline/run_20260523_120000/checkpoint/latest.pt
+python scripts/run_experiments.py --only ablation
+python scripts/run_experiments.py --only sensitivity
+python scripts/run_experiments.py --only multi_seed
 ```
 
-### 测试已训练的模型
+## 6. Output Convention
+
+每次运行输出到：
+
+```text
+outputs/<dataset>/<experiment_name>/run_YYYYMMDD_HHMMSS/
+```
+
+标准目录结构：
+
+```text
+config.yaml
+log/
+figures/
+ckpt/
+tensorboard/
+results/
+```
+
+`results/` 当前建议视为论文与报告的主取数目录，常见文件包括：
+
+```text
+results/results.csv
+results/metadata.json
+results/ca3_memory.pt
+results/ca3_memory_stats.json
+results/group_meta.json
+results/sample_scores.csv        # sample-level datasets
+results/node_scores.csv          # graph node-level datasets
+results/edge_trace.csv
+```
+
+如果启用了 LLM 规则更新，运行目录下还会有：
+
+```text
+llm_rules.json
+```
+
+## 7. Result File Semantics
+
+### `results/results.csv`
+
+这是主汇总表，适合直接做论文表格。
+
+当前核心字段包括：
+
+- `dataset`
+- `variant`
+- `seed`
+- `auc`
+- `f1`
+- `ap`
+- `best_threshold`
+- `train_size`
+- `val_size`
+- `test_size`
+- `smote_applied`
+- `alert_level_ap`
+- `alert_level_f1`
+- `hit_at_k`
+- `subgraph_coverage_node`
+- `subgraph_coverage_edge`
+
+建议：
+
+- 主文表格保留 `auc / f1 / ap`
+- group/subgraph 指标可放正文补充表或附录
+
+### `results/metadata.json`
+
+适合记录一次 run 的上下文，当前通常包含：
+
+- 数据集名称与路径
+- `schema_version`
+- `split_unit`
+- `group_type`
+- `memory_mode`
+- train/val/test 大小
+- 是否启用 group/subgraph eval
+
+### `results/sample_scores.csv`
+
+适用于 `aml`、`amlsim_hi`、`amlsim_li`。
+
+当前字段：
+
+- `sample_idx`
+- `sender_idx`
+- `receiver_idx`
+- `group_id`
+- `label`
+- `risk_score`
+- `attention`
+- `rule_text`
+- `rule_type`
+- `rule_confidence`
+
+用途：
+
+- 直接做样本级排序分析
+- 结合 `group_id` 做 alert/pattern 级统计
+- 作为 sample-level explainability 主表
+
+### `results/node_scores.csv`
+
+适用于 `cryptopia`。
+
+当前字段：
+
+- `node_idx`
+- `group_id`
+- `label`
+- `risk_score`
+- `attention`
+- `rule_text`
+- `rule_type`
+- `rule_confidence`
+
+注意：
+
+- 这里的解释字段是节点邻接边证据聚合后的摘要，不是节点原生 rule trace。
+- 如果要追具体结构证据，请联查 `edge_trace.csv`。
+
+### `results/edge_trace.csv`
+
+这是当前最严格的结构解释导出文件。
+
+字段：
+
+- `edge_id`
+- `src`
+- `dst`
+- `attention`
+- `rule_bias`
+- `rule_match_score`
+- `matched_rule_text`
+- `matched_rule_type`
+- `rule_confidence`
+
+用途：
+
+- 解释某条边为什么被高亮
+- 支撑子图可视化中的边宽和边注释
+- 作为 graph node explainability 的底层证据
+
+### `results/group_meta.json`
+
+这是 `CA3` 显式 group memory 的辅助导出，适合说明 memory slot 与 group 的对应关系。
+
+### `results/ca3_memory.pt` and `results/ca3_memory_stats.json`
+
+用于保留 `CA3` memory state，方便后验分析和复现实验。
+
+## 8. Visualization
+
+当前保留的可视化方案是：
+
+- 左图：真实 group 子图
+- 右图：模型高分子图
+
+示例：
 
 ```bash
-python train.py \
-    --config configs/default.yaml \
-    --test \
-    --checkpoint outputs/baseline/run_20260523_120000/checkpoint/best.pt
+python scripts/plot_group_subgraph_compare.py \
+  --dataset cryptopia \
+  --preprocessed_path preprocessed_cryptopia.pt \
+  --score_file outputs/cryptopia/baseline/run_xxx/results/node_scores.csv \
+  --edge_trace_file outputs/cryptopia/baseline/run_xxx/results/edge_trace.csv
 ```
 
----
+脚本支持：
 
-## 二、消融实验（Ablation Study）
+- 从预处理缓存恢复图或样本图
+- 自动或手动指定真实 group
+- 读取 `node_scores.csv` 或 `sample_scores.csv`
+- 读取 `edge_trace.csv` 叠加边 attention 与规则文本
 
-验证各模块贡献度。共 5 个变体，每个独立运行：
+推荐做法：
 
-| 变体 | 配置 | 说明 |
-|------|------|------|
-| wo_ca1 | `configs/ablation/wo_ca1.yaml` | 移除时序序列编码（CA1） |
-| wo_ca3 | `configs/ablation/wo_ca3.yaml` | 移除关联记忆增强（CA3） |
-| wo_mpfc | `configs/ablation/wo_mpfc.yaml` | 移除图推理模块，用线性分类器替代 |
-| wo_vta | `configs/ablation/wo_vta.yaml` | 用标准 BCE Loss 替代 VTA 加权损失 |
-| wo_llm | `configs/ablation/wo_llm.yaml` | 保留 mPFC 图架构，去掉 LLM 符号规则 |
+- `aml / amlsim_*` 使用 `sample_scores.csv + edge_trace.csv`
+- `cryptopia` 使用 `node_scores.csv + edge_trace.csv`
 
-### 批量运行（推荐）
+## 9. Recommended Reporting Format
 
-```bash
- python scripts/run_experiments.py \
-     --only ablation \
-     --llm_api_url http://127.0.0.1:23333/v1/chat/completions
-```
+如果要直接写实验报告，建议最少保留以下结构：
 
-自动扫描 `configs/ablation/*.yaml`，逐一执行所有变体。
+1. 实验设置
+2. 主指标表：`auc / f1 / ap`
+3. group/subgraph 补充指标表：`alert_level_ap / alert_level_f1 / hit_at_k / subgraph_coverage_*`
+4. 一张子图对比图
+5. 一个 explainability 案例：
+   - sample-level 数据集：引用 `sample_scores.csv`
+   - graph node-level 数据集：引用 `node_scores.csv`，并附 `edge_trace.csv` 证据
 
-### 单独运行某个变体
+建议在报告正文中明确写出：
 
-```bash
-python train.py \
-    --config configs/ablation/wo_ca1.yaml \
-    --llm_api_url http://127.0.0.1:23333/v1/chat/completions \
-    --name ablation_wo_ca1 \
-    --epochs 50
-```
+- 预测粒度是什么
+- 解释粒度是什么
+- 两者是否一致
 
-输出目录：
-```
-outputs/ablation_wo_ca1/run_20260523_120001/
-├── log/<exp_name>.log
-├── figures/{loss_curve,roc_curve,pr_curve,confusion_matrix}.png
-├── checkpoint/{latest,best}.pt
-├── tensorboard/events.out...
-└── results/results.csv
-```
+可直接使用的模板文件：
 
----
+- `refactored/experiment_report_template.md`
 
-## 三、参数敏感性实验（Sensitivity Analysis）
+## 10. Wording Rules For Paper Writing
 
-网格搜索关键超参数。配置定义在 `configs/sensitivity/` 目录下，自动扫描。
+建议统一使用以下口径：
 
-### 批量运行
+- `aml / amlsim_*`：sample-level risk detection with direct edge-grounded explanation
+- `cryptopia`：graph node-level risk detection with edge-grounded node summary explanation
+- `CA3`：explicit group memory enhancement
+- `VTA`：training-time neuromodulation
 
-```bash
-python scripts/run_experiments.py \
-    --only sensitivity \
-    --llm_api_url http://127.0.0.1:23333/v1/chat/completions \
-```
+不建议使用以下表述：
 
-### 当前扫描的参数
+- “CA3 已完成跨案件记忆库检索”
+- “Cryptopia 具有原生节点规则解释”
+- “LLM 已完成严格符号推理”
 
-| 参数 | 文件 | 扫描范围 |
-|------|------|----------|
-| learning_rate | `configs/sensitivity/learning_rate.yaml` | [1e-5, 1e-4, 1e-3, 1e-2, 1e-1] |
-| focal_gamma | `configs/sensitivity/focal_gamma.yaml` | [0.0, 0.5, 1.0, 2.0, 4.0] |
-| rpe_beta | `configs/sensitivity/rpe_beta.yaml` | [0.0, 0.5, 1.0, 1.5, 3.0] |
-| memory_momentum | `configs/sensitivity/memory_momentum.yaml` | [0.0, 0.5, 0.7, 0.9, 0.99] |
+## 11. Migration Note
 
-### 单独运行某个扫描
+以下旧口径不再作为正式论文表述：
 
-```bash
-python train.py \
-    --config configs/sensitivity/learning_rate.yaml \
-    --llm_api_url http://127.0.0.1:23333/v1/chat/completions \
-    --name sensitivity_learning_rate \
-    --epochs 10
-```
+- 旧的 `Cryptopia` 表格滑窗链路
+- `cryptopia_graph` 作为正式数据集名
+- 把所有解释统一写成同一种 instance-level explanation
 
----
-
-## 四、创新实验（VTA 损失解耦 + 多种子稳定性）
-
-### VTA 损失解耦
-
-验证损失函数各组件的贡献。遍历 5 个变体：
-
-| 变体 | focal_gamma | rpe_beta | pos_weight | 说明 |
-|------|-------------|----------|------------|------|
-| full | 2.0 | 1.5 | 5.0 | 完整 VTA 损失 |
-| wo_focal | 0.0 | 1.5 | 5.0 | 去掉焦点损失 |
-| wo_rpe | 2.0 | 0.0 | 5.0 | 去掉奖励预测误差 |
-| wo_pw | 2.0 | 1.5 | 1.0 | 去掉正样本加权 |
-| bce_only | 0.0 | 0.0 | 1.0 | 仅标准 BCE |
-
-```bash
-python scripts/run_experiments.py \
-    --only vta_decomp \
-    --data_path /path/to/dataset.csv
-```
-
-> VTA 解耦实验不依赖 LLM，无需 `--llm_api_url`。
-
-### 多随机种子实验
-
-评估模型在不同随机种子下的稳定性（默认 5 个种子：42, 123, 456, 789, 1111）：
-
-```bash
-python scripts/run_experiments.py \
-    --only multi_seed \
-    --llm_api_url http://127.0.0.1:23333/v1/chat/completions \
-    --data_path /path/to/dataset.csv
-```
-
-种子列表从 `configs/default.yaml` 的 `multi_seed.seeds` 读取，可通过修改配置文件调整。
-
----
-
-## 五、一键运行全部实验
-
-```bash
-python scripts/run_experiments.py \
-    --llm_api_url http://127.0.0.1:23333/v1/chat/completions \
-    --data_path /path/to/dataset.csv \
-    --epochs 10
-```
-
-依次执行：baseline → ablation → sensitivity → vta_decomp → multi_seed，完成后自动汇总结果。
-
-> `scripts/run_experiments.py` 不接受 `--config` 参数。配置文件路径由脚本内部自动拼接。
-
-### 常用选项
-
-| 参数 | 说明 |
-|------|------|
-| `--only <type>` | 仅运行指定类型实验（baseline/ablation/sensitivity/vta_decomp/multi_seed） |
-| `--dry-run` | 只打印命令，不实际执行 |
-| `--summarize-only` | 仅汇总已有结果，不重新运行 |
-| `--no-summarize` | 跳过最终汇总 |
-| `--export <path>` | 导出汇总结果到 CSV 文件 |
-
----
-
-## 输出目录结构
-
-一次实验 = 唯一一个 `run_*` 文件夹：
-
-```
-outputs/<exp_name>/run_YYYYMMDD_HHMMSS/
-├── log/<exp_name>.log                # 文本日志
-├── figures/
-│   ├── loss_curve.png                # 训练 Loss 曲线
-│   ├── roc_curve.png                 # ROC 曲线（含 AUC）
-│   ├── pr_curve.png                  # Precision-Recall 曲线
-│   └── confusion_matrix.png          # 混淆矩阵
-├── checkpoint/
-│   ├── latest.pt                     # 最新模型
-│   └── best.pt                       # 验证集最佳模型
-├── tensorboard/                      # TensorBoard events
-└── results/results.csv               # 实验结果指标
-```
-
-### 结果汇总
-
-批量实验完成后：
-
-```bash
-# 汇总已有实验结果
-python scripts/run_experiments.py --summarize-only
-
-# 导出到 CSV
-python scripts/run_experiments.py --summarize-only --export all_results.csv
-```
-
-### 查看 LLM 规则
-
-```bash
-python scripts/view_llm_rules.py
-```
-
-读取 `outputs/<exp_name>/run_*/llm_rules.json` 展示 MPFC 内置 LLM 生成的 IF-THEN 规则。
+后续所有图表、表格、实验报告，建议统一以本 README 的术语为准。

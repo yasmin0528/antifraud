@@ -45,6 +45,7 @@ class RuleGuidedGATLayer(nn.Module):
 
         self.dropout = nn.Dropout(dropout)
         self.leaky_relu = nn.LeakyReLU(negative_slope)
+        self._last_edge_trace: Optional[dict[str, torch.Tensor]] = None
         self._init_weights()
 
     def _init_weights(self):
@@ -95,6 +96,7 @@ class RuleGuidedGATLayer(nn.Module):
         # Per-destination softmax
         attn = self._edge_softmax(attn, dst, num_nodes)
         attn_weights = attn.detach().clone()
+        self._last_attn = attn_weights
         attn = self.dropout(attn)
 
         # 消息聚合
@@ -103,7 +105,28 @@ class RuleGuidedGATLayer(nn.Module):
         out.index_add_(0, dst, messages.reshape(-1, H * D))
 
         out = self.out_proj(out)
+        self._last_edge_trace = {
+            "attention": attn_weights.detach().clone(),
+            "rule_bias": rule_bias.detach().clone() if rule_bias is not None else torch.zeros(attn_weights.size(0), device=attn_weights.device),
+        }
         return out, attn_weights
+
+    def set_last_edge_trace(
+        self,
+        attention: torch.Tensor,
+        rule_bias: Optional[torch.Tensor] = None,
+        rule_match_score: Optional[torch.Tensor] = None,
+        rule_trace_idx: Optional[torch.Tensor] = None,
+    ):
+        self._last_edge_trace = {
+            "attention": attention.detach().clone(),
+            "rule_bias": rule_bias.detach().clone() if rule_bias is not None else torch.zeros(attention.size(0), device=attention.device),
+            "rule_match_score": rule_match_score.detach().clone() if rule_match_score is not None else torch.zeros(attention.size(0), device=attention.device),
+            "rule_trace_idx": rule_trace_idx.detach().clone() if rule_trace_idx is not None else torch.full((attention.size(0),), -1, dtype=torch.long, device=attention.device),
+        }
+
+    def get_last_edge_trace(self) -> Optional[dict[str, torch.Tensor]]:
+        return self._last_edge_trace
 
     @staticmethod
     def _edge_softmax(
