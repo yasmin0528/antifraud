@@ -236,10 +236,9 @@ def setup_experiment(config_paths: List[str], cli_overrides: Optional[Dict] = No
     if cfg.data.preprocessed_path and not os.path.isabs(cfg.data.preprocessed_path):
         cfg.data.preprocessed_path = os.path.join(config_dir, cfg.data.preprocessed_path)
 
-    if cfg.data.dataset in ("cryptopia", "cryptopia_graph"):
-        preprocessed_dir = os.path.dirname(cfg.data.preprocessed_path)
-        if preprocessed_dir and not os.path.exists(preprocessed_dir):
-            os.makedirs(preprocessed_dir, exist_ok=True)
+    preprocessed_dir = os.path.dirname(cfg.data.preprocessed_path)
+    if preprocessed_dir and not os.path.exists(preprocessed_dir):
+        os.makedirs(preprocessed_dir, exist_ok=True)
 
     saved_config_path = os.path.join(output_dir, "config.yaml")
     if not os.path.exists(saved_config_path):

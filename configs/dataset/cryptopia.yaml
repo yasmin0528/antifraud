@@ -1,8 +1,8 @@
 # CryptopiaHacker unified graph-based dataset config.
 data:
   dataset: "cryptopia"
-  data_path: "CryptopiaHacker"
-  preprocessed_path: "preprocessed_cryptopia.pt"
+  data_path: "../../../autodl-tmp/CryptopiaHacker"
+  preprocessed_path: "../../../autodl-tmp/preprocessed_cache/preprocessed_cryptopia.pt"
   regenerate: false
   val_ratio: 0.1
   test_ratio: 0.1
