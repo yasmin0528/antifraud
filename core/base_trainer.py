@@ -299,11 +299,18 @@ class BaseTrainer:
             embeddings[valid_mask] = valid_h
             score_micro[valid_mask] = valid_score
 
+        ca3_da_signal = da_signal
+        if torch.is_tensor(ca3_da_signal) and ca3_da_signal.numel() > 1:
+            if ca3_da_signal.dim() == 1 and ca3_da_signal.size(0) != embeddings.size(0):
+                ca3_da_signal = ca3_da_signal.mean()
+            elif ca3_da_signal.dim() > 1 and ca3_da_signal.size(0) != embeddings.size(0):
+                ca3_da_signal = ca3_da_signal.mean()
+
         if "ca3" in self.models:
             embeddings = self.models["ca3"](
                 embeddings,
                 group_ids=alert_bank,
-                da_signal=da_signal,
+                da_signal=ca3_da_signal,
                 update_memory=self._ca3_update_memory,
             )
 

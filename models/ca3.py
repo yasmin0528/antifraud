@@ -61,8 +61,16 @@ class CA3_AGM(nn.Module):
         if da_signal.dim() == 0:
             return da_signal.view(1, 1).expand(h.size(0), 1)
         if da_signal.dim() == 1:
-            return da_signal.view(-1, 1)
-        return da_signal.view(h.size(0), 1)
+            if da_signal.numel() == 1:
+                return da_signal.view(1, 1).expand(h.size(0), 1)
+            if da_signal.size(0) == h.size(0):
+                return da_signal.view(-1, 1)
+            return da_signal.mean().view(1, 1).expand(h.size(0), 1)
+        if da_signal.numel() == 1:
+            return da_signal.view(1, 1).expand(h.size(0), 1)
+        if da_signal.size(0) == h.size(0):
+            return da_signal.reshape(h.size(0), 1)
+        return da_signal.mean().view(1, 1).expand(h.size(0), 1)
 
     def forward(
         self,
