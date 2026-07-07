@@ -13,8 +13,8 @@ experiment:
 # -------- 数据配置 --------
 data:
   dataset: "aml"
-  data_path: "../../autodl-tmp/dataset.csv"
-  preprocessed_path: "../../autodl-tmp/preprocessed_cache/preprocessed_data.pt"
+  data_path: "../../dataset.csv"
+  preprocessed_path: "../../preprocessed_cache/preprocessed_data.pt"
   regenerate: false
   val_ratio: 0.1
   test_ratio: 0.1

@@ -3,8 +3,8 @@ experiment:
 
 data:
   dataset: "aml"
-  data_path: "../../../autodl-tmp/dataset.csv"
-  preprocessed_path: "../../../autodl-tmp/preprocessed_cache/preprocessed_aml_smoke.pt"
+  data_path: "../../../dataset.csv"
+  preprocessed_path: "../../../preprocessed_cache/preprocessed_aml_smoke.pt"
   num_workers: 0
 
 train:

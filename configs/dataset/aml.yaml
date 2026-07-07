@@ -1,8 +1,8 @@
 # AML 数据集配置
 data:
   dataset: "aml"
-  data_path: "../../../autodl-tmp/dataset.csv"
-  preprocessed_path: "../../../autodl-tmp/preprocessed_cache/preprocessed_aml.pt"
+  data_path: "../../../dataset.csv"
+  preprocessed_path: "../../../preprocessed_cache/preprocessed_aml.pt"
   regenerate: false
   val_ratio: 0.1
   test_ratio: 0.1
