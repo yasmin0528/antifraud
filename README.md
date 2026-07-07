@@ -179,6 +179,19 @@ python scripts/run_experiments.py --only sensitivity
 python scripts/run_experiments.py --only multi_seed
 ```
 
+### Smoke Training
+
+Use these to verify that the training pipeline, evaluation, and result export all run end-to-end before starting long experiments.
+
+```bash
+python train.py --config configs/default.yaml --config configs/dataset/cryptopia.yaml --config configs/smoke/cryptopia.yaml
+python train.py --config configs/default.yaml --config configs/dataset/aml.yaml --config configs/smoke/aml.yaml
+```
+
+Repository checklist:
+
+- `refactored/smoke_training_checklist.md`
+
 ## 6. Output Convention
 
 每次运行输出到：

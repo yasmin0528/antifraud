@@ -1,0 +1,19 @@
+experiment:
+  name: "smoke_cryptopia"
+
+data:
+  dataset: "cryptopia"
+  data_path: "../../CryptopiaHacker"
+  preprocessed_path: "preprocessed_cryptopia.pt"
+  num_workers: 0
+
+train:
+  epochs: 1
+  patience: 1
+
+eval:
+  enable_subgraph_metrics: true
+
+visualization:
+  enabled: false
+  save_figures: false

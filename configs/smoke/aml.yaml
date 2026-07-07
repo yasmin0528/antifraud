@@ -1,0 +1,19 @@
+experiment:
+  name: "smoke_aml"
+
+data:
+  dataset: "aml"
+  data_path: "../../AMLdataset.csv"
+  preprocessed_path: "../preprocessed_aml_smoke.pt"
+  num_workers: 0
+
+train:
+  epochs: 1
+  patience: 1
+
+eval:
+  enable_subgraph_metrics: true
+
+visualization:
+  enabled: false
+  save_figures: false

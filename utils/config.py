@@ -1,25 +1,14 @@
 """
-配置文件加载与管理。
-
-支持：
-- YAML 配置文件加载
-- 命令行参数覆盖（via argparse）
-- 多配置合并（默认 + 实验特定）
-- 类型安全的 dataclass 访问
+Configuration loading and merging utilities.
 """
 
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass, field, asdict
-from typing import Dict, List, Optional, Any, Tuple
+from dataclasses import asdict, dataclass, field
+from typing import Any, Dict, List, Optional
 
 import yaml
-
-
-# ============================================================
-# 类型安全的配置类（对应 default.yaml）
-# ============================================================
 
 
 @dataclass
@@ -43,7 +32,7 @@ class DataConfig:
     smote_ratio: float = 1.0
     batch_size: int = 32
     num_workers: int = 0
-    window_size: int = 10                     # 滑动窗口大小（cryptopia 数据集使用）
+    window_size: int = 10
 
 
 @dataclass
@@ -139,16 +128,18 @@ class AblationConfig:
 class SweepConfig:
     enabled: bool = False
     method: str = "grid"
-    params: Dict[str, Optional[List[Any]]] = field(default_factory=lambda: {
-        "batch_size": None,
-        "lr": None,
-        "hidden_dim": None,
-        "dropout": None,
-        "pos_weight": None,
-        "focal_gamma": None,
-        "gnn_layers": None,
-        "gnn_heads": None,
-    })
+    params: Dict[str, Optional[List[Any]]] = field(
+        default_factory=lambda: {
+            "batch_size": None,
+            "lr": None,
+            "hidden_dim": None,
+            "dropout": None,
+            "pos_weight": None,
+            "focal_gamma": None,
+            "gnn_layers": None,
+            "gnn_heads": None,
+        }
+    )
 
 
 @dataclass
@@ -169,23 +160,17 @@ class VisualizationConfig:
 
 
 @dataclass
-class VTAVariantConfig:
-    name: str = ""
-    focal_gamma: float = 2.0
-    rpe_beta: float = 1.5
-    pos_weight: float = 5.0
-
-
-@dataclass
 class VTADecompConfig:
     enabled: bool = False
-    variants: List[Dict] = field(default_factory=lambda: [
-        {"name": "full", "focal_gamma": 2.0, "rpe_beta": 1.5, "pos_weight": 5.0},
-        {"name": "wo_focal", "focal_gamma": 0.0, "rpe_beta": 1.5, "pos_weight": 5.0},
-        {"name": "wo_rpe", "focal_gamma": 2.0, "rpe_beta": 0.0, "pos_weight": 5.0},
-        {"name": "wo_pw", "focal_gamma": 2.0, "rpe_beta": 1.5, "pos_weight": 1.0},
-        {"name": "bce_only", "focal_gamma": 0.0, "rpe_beta": 0.0, "pos_weight": 1.0},
-    ])
+    variants: List[Dict[str, Any]] = field(
+        default_factory=lambda: [
+            {"name": "full", "focal_gamma": 2.0, "rpe_beta": 1.5, "pos_weight": 5.0},
+            {"name": "wo_focal", "focal_gamma": 0.0, "rpe_beta": 1.5, "pos_weight": 5.0},
+            {"name": "wo_rpe", "focal_gamma": 2.0, "rpe_beta": 0.0, "pos_weight": 5.0},
+            {"name": "wo_pw", "focal_gamma": 2.0, "rpe_beta": 1.5, "pos_weight": 1.0},
+            {"name": "bce_only", "focal_gamma": 0.0, "rpe_beta": 0.0, "pos_weight": 1.0},
+        ]
+    )
 
 
 @dataclass
@@ -204,7 +189,6 @@ class Config:
     vta_decomp: VTADecompConfig = field(default_factory=VTADecompConfig)
 
     def __post_init__(self):
-        # 将嵌套 dict 转为 dataclass
         if isinstance(self.experiment, dict):
             self.experiment = ExperimentConfig(**self.experiment)
         if isinstance(self.data, dict):
@@ -234,7 +218,7 @@ class Config:
         if isinstance(self.vta_decomp, dict):
             self.vta_decomp = VTADecompConfig(**self.vta_decomp)
 
-    def to_dict(self) -> Dict:
+    def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
 
 
@@ -246,13 +230,8 @@ _SUBCONFIG_MAP = {
 }
 
 
-# ============================================================
-# 加载与合并
-# ============================================================
-
-
 def load_config(path: str) -> Config:
-    """从 YAML 文件加载配置。"""
+    """Load config from YAML."""
     if not os.path.exists(path):
         raise FileNotFoundError(f"Config file not found: {path}")
 
@@ -265,34 +244,27 @@ def load_config(path: str) -> Config:
 
 
 def _validate_config(cfg: Config):
-    """验证配置的有效性。
-
-    LLM 是 mPFC 模块的内置组件。当使用 LLM 时（非 wo_llm 消融模式），
-    需要配置 API URL 或模型名称。
-    """
+    """Validate critical configuration requirements."""
     is_wo_llm = "wo_llm" in cfg.ablation.remove_modules
-    if not is_wo_llm:
-        if not cfg.model.llm.api_url and not cfg.model.llm.model_name:
-            raise ValueError(
-                "LLM 是 mPFC 模块的内置组件，需要配置 model.llm.api_url（API 地址）"
-                "或 model.llm.model_name（本地模型名称）。\n"
-                "请检查配置文件中的 llm 节，或在命令行通过 "
-                "--llm_api_url / --llm_model_name 指定。\n"
-                "如需运行 wo_llm 消融实验（去除 LLM），请设置 "
-                "ablation.remove_modules 包含 'wo_llm'。"
-            )
+    if not is_wo_llm and not cfg.model.llm.api_url and not cfg.model.llm.model_name:
+        raise ValueError(
+            "LLM is an internal component of MPFC. Configure either "
+            "model.llm.api_url or model.llm.model_name. You can also override "
+            "them with --llm_api_url / --llm_model_name. If you want to run "
+            "the no-LLM ablation, include 'wo_llm' in ablation.remove_modules."
+        )
 
 
-def merge_config(base: Config, override: Dict) -> Config:
-    """将命令行参数或另一个 YAML 的配置合并到基础配置上。"""
+def merge_config(base: Config, override: Dict[str, Any]) -> Config:
+    """Merge CLI args or another YAML override into a base config."""
     base_dict = asdict(base)
 
-    def _deep_merge(d: Dict, u: Dict) -> Dict:
-        for k, v in u.items():
-            if k in d and isinstance(d[k], dict) and isinstance(v, dict):
-                _deep_merge(d[k], v)
+    def _deep_merge(d: Dict[str, Any], u: Dict[str, Any]) -> Dict[str, Any]:
+        for key, value in u.items():
+            if key in d and isinstance(d[key], dict) and isinstance(value, dict):
+                _deep_merge(d[key], value)
             else:
-                d[k] = v
+                d[key] = value
         return d
 
     merged = _deep_merge(base_dict, override)

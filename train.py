@@ -1,41 +1,21 @@
 #!/usr/bin/env python3
 """
-统一训练入口 —— AML 反洗钱检测模型。
+Unified training entrypoint for AML experiments.
 
-功能：
-- 配置加载与命令行覆盖
-- 实验运行（基础/消融/参数扫描/多种子/推理）
-- 结果记录与可视化
-
-用法：
-    # 基础实验
+Examples:
     python train.py --config configs/default.yaml
-
-    # 消融实验
     python train.py --config configs/default.yaml --ablation
-
-    # 参数敏感性
-    python train.py --config configs/sensitivity/batch_size.yaml
-
-    # 多随机种子
     python train.py --config configs/default.yaml --multi_seed
-
-    # 推理测试
-    python train.py --config configs/default.yaml --test --checkpoint outputs/model_best.pt
-
-    # 断点续训（自动找最新 checkpoint）
-    python train.py --config configs/default.yaml --resume
-
-    # 断点续训（指定 checkpoint 路径）
-    python train.py --config configs/default.yaml --resume outputs/exp_name/run_xxx/ckpt/latest.pt
-
-    # 快速覆盖
     python train.py --config configs/default.yaml --epochs 20 --lr 0.0005 --batch_size 64
+    python train.py --config configs/default.yaml --test --checkpoint outputs/model_best.pt
+    python train.py --config configs/default.yaml --resume
+    python train.py --config configs/default.yaml --resume outputs/exp_name/run_xxx/ckpt/latest.pt
 """
+
+from __future__ import annotations
 
 import argparse
 import os
-import sys
 from typing import Dict, List, Optional
 
 import yaml
@@ -47,89 +27,90 @@ from utils.config import Config
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="AML 反洗钱检测模型训练入口",
+        description="AML training entrypoint.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
 
-    # 配置（支持多个 --config，后面的覆盖前面的）
     parser.add_argument(
-        "--config", type=str, action="append", default=None,
-        help='配置文件路径（可指定多个，后面的覆盖前面的；默认: configs/default.yaml）',
+        "--config",
+        type=str,
+        action="append",
+        default=None,
+        help="Config file path. Can be specified multiple times. Defaults to configs/default.yaml.",
     )
 
-    # 实验模式
+    parser.add_argument("--ablation", action="store_true", help="Run ablation experiments.")
+    parser.add_argument("--multi_seed", action="store_true", help="Run multi-seed experiments.")
+    parser.add_argument("--sweep", action="store_true", help="Run parameter sweep experiments.")
     parser.add_argument(
-        "--ablation", action="store_true",
-        help="运行消融实验",
+        "--resume",
+        nargs="?",
+        const="auto",
+        default=None,
+        help="Resume training. Omit the value to auto-discover the latest checkpoint, or pass a checkpoint path.",
     )
     parser.add_argument(
-        "--multi_seed", action="store_true",
-        help="运行多随机种子实验",
+        "--test",
+        action="store_true",
+        help="Run test mode. Usually paired with --checkpoint.",
     )
+
+    parser.add_argument("--name", type=str, default=None, help="Experiment name override.")
+    parser.add_argument("--output_dir", type=str, default=None, help="Experiment output directory override.")
+    parser.add_argument("--seed", type=int, default=None, help="Random seed override.")
+
+    parser.add_argument("--hidden_dim", type=int, default=None, help="Model hidden dimension override.")
+    parser.add_argument("--dropout", type=float, default=None, help="Model dropout override.")
+
     parser.add_argument(
-        "--sweep", action="store_true",
-        help="运行参数敏感性扫描",
+        "--llm_api_url",
+        type=str,
+        default=None,
+        help="LLM API URL used by the MPFC rule generator.",
     )
+    parser.add_argument("--llm_model_name", type=str, default=None, help="LLM model name override.")
+    parser.add_argument("--llm_update_freq", type=int, default=None, help="LLM rule update frequency override.")
+
+    parser.add_argument("--gnn_layers", type=int, default=None, help="Number of MPFC GNN layers.")
+    parser.add_argument("--gnn_heads", type=int, default=None, help="Number of MPFC attention heads.")
+
     parser.add_argument(
-        "--resume", nargs="?", const="auto", default=None,
-        help='断点续训。不传值 = 自动找最新的 latest.pt; 传路径 = 使用指定 checkpoint',
+        "--dataset",
+        type=str,
+        default=None,
+        help='Dataset name. Common values: "aml", "cryptopia", "amlsim_hi", "amlsim_li".',
     )
+    parser.add_argument("--data_path", type=str, default=None, help="Raw dataset path override.")
     parser.add_argument(
-        "--test", action="store_true",
-        help="推理测试模式（需配合 --checkpoint）",
+        "--preprocessed_path",
+        type=str,
+        default=None,
+        help="Preprocessed cache path override.",
     )
+    parser.add_argument("--use_smote", action="store_true", help="Enable SMOTE for the train split.")
+    parser.add_argument("--smote_ratio", type=float, default=None, help="SMOTE sampling ratio override.")
+    parser.add_argument("--regenerate", action="store_true", help="Force preprocessing regeneration.")
+    parser.add_argument("--val_ratio", type=float, default=None, help="Validation ratio override.")
+    parser.add_argument("--test_ratio", type=float, default=None, help="Test ratio override.")
 
-    # 实验名称与输出
-    parser.add_argument("--name", type=str, default=None, help="实验名称")
-    parser.add_argument("--output_dir", type=str, default=None, help="输出目录")
-    parser.add_argument("--seed", type=int, default=None, help="随机种子")
+    parser.add_argument("--epochs", type=int, default=None, help="Training epoch override.")
+    parser.add_argument("--batch_size", type=int, default=None, help="Batch size override.")
+    parser.add_argument("--lr", type=float, default=None, help="Learning rate override.")
+    parser.add_argument("--weight_decay", type=float, default=None, help="Weight decay override.")
+    parser.add_argument("--pos_weight", type=float, default=None, help="Positive-class weight override.")
+    parser.add_argument("--focal_gamma", type=float, default=None, help="Focal loss gamma override.")
+    parser.add_argument("--rpe_beta", type=float, default=None, help="VTA RPE beta override.")
+    parser.add_argument("--patience", type=int, default=None, help="Early stopping patience override.")
+    parser.add_argument("--grad_clip", type=float, default=None, help="Gradient clipping override.")
 
-    # 模型超参数
-    parser.add_argument("--hidden_dim", type=int, default=None)
-    parser.add_argument("--dropout", type=float, default=None)
-
-    # LLM 参数
-    parser.add_argument("--llm_api_url", type=str, default=None, help="LLM API URL（mPFC 内置 LLM 规则生成接口）")
-    parser.add_argument("--llm_model_name", type=str, default=None, help="LLM 模型名称")
-    parser.add_argument("--llm_update_freq", type=int, default=None, help="LLM 规则更新频率")
-
-    # GNN 参数
-    parser.add_argument("--gnn_layers", type=int, default=None)
-    parser.add_argument("--gnn_heads", type=int, default=None)
-
-    # 数据
-    parser.add_argument("--dataset", type=str, default=None,
-                        help='数据集类型: "aml" | "cryptopia"')
-    parser.add_argument("--data_path", type=str, default=None)
-    parser.add_argument("--preprocessed_path", type=str, default=None)
-    parser.add_argument("--use_smote", action="store_true")
-    parser.add_argument("--smote_ratio", type=float, default=None)
-    parser.add_argument("--regenerate", action="store_true")
-    parser.add_argument("--val_ratio", type=float, default=None)
-    parser.add_argument("--test_ratio", type=float, default=None)
-
-    # 训练
-    parser.add_argument("--epochs", type=int, default=None)
-    parser.add_argument("--batch_size", type=int, default=None)
-    parser.add_argument("--lr", type=float, default=None)
-    parser.add_argument("--weight_decay", type=float, default=None)
-    parser.add_argument("--pos_weight", type=float, default=None)
-    parser.add_argument("--focal_gamma", type=float, default=None)
-    parser.add_argument("--rpe_beta", type=float, default=None)
-    parser.add_argument("--patience", type=int, default=None)
-    parser.add_argument("--grad_clip", type=float, default=None)
-
-    # 测试
-    parser.add_argument("--checkpoint", type=str, default=None)
-
+    parser.add_argument("--checkpoint", type=str, default=None, help="Checkpoint path for --test.")
     return parser.parse_args()
 
 
 def build_overrides(args: argparse.Namespace) -> Dict:
-    """将命令行参数转为配置覆盖字典。"""
+    """Convert CLI arguments into config overrides."""
     overrides: Dict = {}
 
-    # 实验模式
     if args.ablation:
         overrides["ablation"] = {"enabled": True}
     if args.multi_seed:
@@ -139,40 +120,34 @@ def build_overrides(args: argparse.Namespace) -> Dict:
     if args.resume is not None:
         overrides["experiment"] = {"mode": "resume"}
         if args.resume != "auto":
-            # 显式指定了 checkpoint 路径
             overrides["experiment"]["resume_ckpt"] = args.resume
     if args.test:
         overrides["experiment"] = {"mode": "test"}
 
-    # 实验元信息
     if args.name:
         overrides.setdefault("experiment", {})["name"] = args.name
     if args.output_dir:
         overrides.setdefault("experiment", {})["output_dir"] = args.output_dir
-    if args.seed:
+    if args.seed is not None:
         overrides.setdefault("experiment", {})["seed"] = args.seed
 
-    # 模型
-    if args.hidden_dim:
+    if args.hidden_dim is not None:
         overrides.setdefault("model", {})["hidden_dim"] = args.hidden_dim
-    if args.dropout:
+    if args.dropout is not None:
         overrides.setdefault("model", {})["dropout"] = args.dropout
 
-    # LLM
     if args.llm_api_url:
         overrides.setdefault("model", {}).setdefault("llm", {})["api_url"] = args.llm_api_url
     if args.llm_model_name:
         overrides.setdefault("model", {}).setdefault("llm", {})["model_name"] = args.llm_model_name
-    if args.llm_update_freq:
+    if args.llm_update_freq is not None:
         overrides.setdefault("model", {}).setdefault("llm", {})["rule_update_frequency"] = args.llm_update_freq
 
-    # GNN
-    if args.gnn_layers:
+    if args.gnn_layers is not None:
         overrides.setdefault("model", {}).setdefault("mpfc", {})["gnn_layers"] = args.gnn_layers
-    if args.gnn_heads:
+    if args.gnn_heads is not None:
         overrides.setdefault("model", {}).setdefault("mpfc", {})["gnn_heads"] = args.gnn_heads
 
-    # 数据
     if args.dataset:
         overrides.setdefault("data", {})["dataset"] = args.dataset
     if args.data_path:
@@ -181,34 +156,33 @@ def build_overrides(args: argparse.Namespace) -> Dict:
         overrides.setdefault("data", {})["preprocessed_path"] = args.preprocessed_path
     if args.use_smote:
         overrides.setdefault("data", {})["use_smote"] = True
-    if args.smote_ratio:
+    if args.smote_ratio is not None:
         overrides.setdefault("data", {})["smote_ratio"] = args.smote_ratio
     if args.regenerate:
         overrides.setdefault("data", {})["regenerate"] = True
-    if args.val_ratio:
+    if args.val_ratio is not None:
         overrides.setdefault("data", {})["val_ratio"] = args.val_ratio
-    if args.test_ratio:
+    if args.test_ratio is not None:
         overrides.setdefault("data", {})["test_ratio"] = args.test_ratio
-    if args.batch_size:
+    if args.batch_size is not None:
         overrides.setdefault("data", {})["batch_size"] = args.batch_size
 
-    # 训练
     train_overrides = {}
-    if args.epochs:
+    if args.epochs is not None:
         train_overrides["epochs"] = args.epochs
-    if args.lr:
+    if args.lr is not None:
         train_overrides["lr"] = args.lr
-    if args.weight_decay:
+    if args.weight_decay is not None:
         train_overrides["weight_decay"] = args.weight_decay
-    if args.pos_weight:
+    if args.pos_weight is not None:
         train_overrides["pos_weight"] = args.pos_weight
-    if args.focal_gamma:
+    if args.focal_gamma is not None:
         train_overrides["focal_gamma"] = args.focal_gamma
-    if args.rpe_beta:
+    if args.rpe_beta is not None:
         train_overrides["rpe_beta"] = args.rpe_beta
-    if args.patience:
+    if args.patience is not None:
         train_overrides["patience"] = args.patience
-    if args.grad_clip:
+    if args.grad_clip is not None:
         train_overrides["grad_clip"] = args.grad_clip
     if train_overrides:
         overrides["train"] = train_overrides
@@ -216,85 +190,84 @@ def build_overrides(args: argparse.Namespace) -> Dict:
     return overrides
 
 
-def setup_experiment(
-    config_paths: List[str], cli_overrides: Optional[Dict] = None
-) -> Config:
-    """
-    加载配置并设置实验环境。
-
-    Args:
-        config_paths: YAML 配置文件路径列表（后面的覆盖前面的）
-        cli_overrides: 命令行参数覆盖字典
-
-    Returns:
-        cfg: 合并后的配置对象
-    """
+def setup_experiment(config_paths: List[str], cli_overrides: Optional[Dict] = None) -> Config:
+    """Load, merge, and normalize experiment configs."""
     if not config_paths:
         config_paths = ["configs/default.yaml"]
 
     base_dir = os.path.dirname(os.path.abspath(__file__))
 
-    # 解析并加载所有配置文件，依次合并（后面的覆盖前面的）
     cfg = None
     for cp in config_paths:
-        if not os.path.isabs(cp):
-            cp = os.path.join(base_dir, cp)
-        if not os.path.exists(cp):
-            raise FileNotFoundError(f"Configuration file not found: {cp}")
+        abs_path = cp if os.path.isabs(cp) else os.path.join(base_dir, cp)
+        if not os.path.exists(abs_path):
+            raise FileNotFoundError(f"Configuration file not found: {abs_path}")
         if cfg is None:
-            cfg = load_config(cp)
+            cfg = load_config(abs_path)
         else:
-            # 直接加载 YAML 原始 dict（只包含文件中实际存在的字段）
-            # 避免 load_config 填充默认值后覆盖已有配置
-            with open(cp, "r", encoding="utf-8") as f:
+            with open(abs_path, "r", encoding="utf-8") as f:
                 override_dict = yaml.safe_load(f) or {}
             cfg = merge_config(cfg, override_dict)
 
     if cfg is None:
         raise FileNotFoundError("No configuration file loaded.")
 
-    # 合并 CLI 覆盖
     if cli_overrides:
         cfg = merge_config(cfg, cli_overrides)
 
-    # 创建输出目录
     output_dir = os.path.join(cfg.experiment.output_dir, cfg.experiment.name)
     os.makedirs(output_dir, exist_ok=True)
 
-    # 将数据路径转为绝对路径（相对于主配置文件所在目录）
     main_config = config_paths[0]
     if not os.path.isabs(main_config):
         main_config = os.path.join(base_dir, main_config)
     config_dir = os.path.dirname(os.path.abspath(main_config))
+
     if cfg.data.data_path and not os.path.isabs(cfg.data.data_path):
-        # 优先尝试相对于配置文件目录
         config_rel = os.path.join(config_dir, cfg.data.data_path)
-        # 如果不存在，尝试相对于项目根目录
         project_rel = os.path.join(base_dir, cfg.data.data_path)
         if os.path.exists(config_rel):
             cfg.data.data_path = config_rel
         elif os.path.exists(project_rel):
             cfg.data.data_path = project_rel
         else:
-            cfg.data.data_path = config_rel  # 默认用 config 相对路径
+            cfg.data.data_path = config_rel
+
     if cfg.data.preprocessed_path and not os.path.isabs(cfg.data.preprocessed_path):
         cfg.data.preprocessed_path = os.path.join(config_dir, cfg.data.preprocessed_path)
-    # 对于目录型数据源（如 CryptopiaHacker），创建预处理文件到目录下
+
     if cfg.data.dataset in ("cryptopia", "cryptopia_graph"):
         preprocessed_dir = os.path.dirname(cfg.data.preprocessed_path)
         if preprocessed_dir and not os.path.exists(preprocessed_dir):
             os.makedirs(preprocessed_dir, exist_ok=True)
 
-    # 保存最终配置到实验输出目录（供 test/resume 模式复用）
     saved_config_path = os.path.join(output_dir, "config.yaml")
     if not os.path.exists(saved_config_path):
         try:
-            with open(saved_config_path, "w") as f:
+            with open(saved_config_path, "w", encoding="utf-8") as f:
                 yaml.dump(cfg.to_dict(), f, default_flow_style=False, allow_unicode=True)
-        except Exception as e:
-            print(f"[WARN] Failed to save config: {e}")
+        except Exception as exc:
+            print(f"[WARN] Failed to save config: {exc}")
 
     return cfg
+
+
+def _normalize_dataset_name(dataset_name: str) -> str:
+    return "cryptopia" if dataset_name == "cryptopia_graph" else dataset_name
+
+
+def _make_single_trainer(cfg: Config, resume: bool = False):
+    dataset_name = _normalize_dataset_name(cfg.data.dataset)
+    if dataset_name == "cryptopia":
+        from core.graph_trainer import GraphNodeTrainer
+
+        cfg.data.dataset = dataset_name
+        return GraphNodeTrainer(cfg, resume=resume)
+
+    from core.base_trainer import BaseTrainer
+
+    cfg.data.dataset = dataset_name
+    return BaseTrainer(cfg, resume=resume)
 
 
 def main():
@@ -303,7 +276,6 @@ def main():
     config_paths = args.config if args.config else ["configs/default.yaml"]
     cfg = setup_experiment(config_paths, overrides)
 
-    # 记录配置（仅控制台，文件日志由 base_trainer 负责）
     logger = Logger(
         name="train",
         log_dir=os.path.join(cfg.experiment.output_dir, cfg.experiment.name),
@@ -314,32 +286,21 @@ def main():
     logger.info(f"Model: {cfg.model.name}")
 
     if args.test and args.checkpoint:
-        # 推理测试模式
-        from core.base_trainer import BaseTrainer
-
-        # 如果数据路径不合法（用最小配置如 wo_ca1.yaml 加载时可能丢失路径），
-        # 尝试从 checkpoint 目录反推：.../exp_name/run_xxx/ckpt/ → exp_name → 找 default.yaml
         if not cfg.data.data_path or not os.path.exists(cfg.data.data_path):
             ckpt_dir_parts = os.path.normpath(args.checkpoint).split(os.sep)
-            # 从 checkpoint 路径中找到 exp_name（run_xxx 的上一级）
             try:
-                run_idx = next(i for i, p in enumerate(ckpt_dir_parts) if p.startswith("run_"))
+                run_idx = next(i for i, part in enumerate(ckpt_dir_parts) if part.startswith("run_"))
                 exp_name = ckpt_dir_parts[run_idx - 1]
-                # 尝试加载同实验名下保存的完整配置
                 exp_config = os.path.join(cfg.experiment.output_dir, exp_name, "config.yaml")
                 if os.path.exists(exp_config):
                     cfg = load_config(exp_config)
                     logger.info(f"Reused saved config from {exp_config}")
                 else:
-                    # 退化回 default.yaml
-                    fallback = "configs/default.yaml"
-                    if not os.path.isabs(fallback):
-                        fallback = os.path.join(os.path.dirname(os.path.abspath(__file__)), fallback)
+                    fallback = os.path.join(os.path.dirname(os.path.abspath(__file__)), "configs/default.yaml")
                     if os.path.exists(fallback):
                         cfg = load_config(fallback)
                         cfg.experiment.name = exp_name
                         logger.info(f"Fallback to {fallback} (data path not found)")
-                        # 重新 resolve 数据路径
                         config_dir = os.path.dirname(os.path.abspath(fallback))
                         if cfg.data.data_path and not os.path.isabs(cfg.data.data_path):
                             cfg.data.data_path = os.path.join(config_dir, cfg.data.data_path)
@@ -351,19 +312,18 @@ def main():
         logger.info(f"Test mode with checkpoint: {args.checkpoint}")
         logger.info(f"Data path: {cfg.data.data_path}")
         logger.info(f"Preprocessed path: {cfg.data.preprocessed_path}")
-        trainer = BaseTrainer(cfg)
+        trainer = _make_single_trainer(cfg)
         trainer.test(checkpoint_path=args.checkpoint)
-    elif args.resume:
-        # 断点续训模式
-        from core.base_trainer import BaseTrainer
+        return
 
+    if args.resume:
         logger.info(f"Resume mode: {cfg.experiment.name}")
-        trainer = BaseTrainer(cfg, resume=True)
+        trainer = _make_single_trainer(cfg, resume=True)
         trainer.train()
-    else:
-        # 正常实验模式
-        runner = ExperimentRunner(cfg, config_path=config_paths[0])
-        runner.run()
+        return
+
+    runner = ExperimentRunner(cfg, config_path=config_paths[0])
+    runner.run()
 
 
 if __name__ == "__main__":
