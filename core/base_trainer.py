@@ -375,13 +375,20 @@ class BaseTrainer:
             fallback_scores=fallback_score,
         )
 
+        mpfc_da_signal = da_signal
+        if torch.is_tensor(mpfc_da_signal) and mpfc_da_signal.numel() > 1:
+            if mpfc_da_signal.dim() == 1 and mpfc_da_signal.size(0) != node_x.size(0):
+                mpfc_da_signal = mpfc_da_signal.mean()
+            elif mpfc_da_signal.dim() > 1 and mpfc_da_signal.size(0) != node_x.size(0):
+                mpfc_da_signal = mpfc_da_signal.mean()
+
         if has_mpfc:
             _, logit, prob, edge_trace = self.models["mpfc"](
                 node_x,
                 edge_index,
                 edge_attr_batch,
                 transaction_summary=transaction_summary,
-                da_signal=da_signal,
+                da_signal=mpfc_da_signal,
             )
         else:
             logit = self.models["classifier"](node_x)

@@ -283,8 +283,19 @@ class MPFC(nn.Module):
             elif da_signal.numel() == 1:
                 da_raw = torch.full((edge_index.size(1),), float(da_signal.item()), device=x.device, dtype=x.dtype)
             else:
+                da_signal_t = da_signal.to(device=x.device, dtype=x.dtype)
                 src_nodes = edge_index[0]
-                da_raw = da_signal[src_nodes].view(-1).to(device=x.device, dtype=x.dtype)
+                if da_signal_t.dim() == 1 and da_signal_t.size(0) == x.size(0):
+                    da_raw = da_signal_t[src_nodes].view(-1)
+                elif da_signal_t.dim() > 1 and da_signal_t.size(0) == x.size(0):
+                    da_raw = da_signal_t[src_nodes].view(-1)
+                else:
+                    da_raw = torch.full(
+                        (edge_index.size(1),),
+                        float(da_signal_t.mean().item()),
+                        device=x.device,
+                        dtype=x.dtype,
+                    )
 
             # DA 信号映射到 4 个调控维度，每个维度的敏感度不同
             # 归一化 DA 到 [0, 1] 范围： (da - 1.0) / rpe_beta
